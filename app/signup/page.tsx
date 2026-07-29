@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatAuthError, trimAuthInput } from "@/lib/auth/errors";
+import { getPersonNameError } from "@/lib/utils";
 import {
   mapEndUserToUserFields,
   syncEndUserProfile,
@@ -129,11 +130,13 @@ export default function SignupPage() {
     const password = trimAuthInput(data.password);
     const confirmPassword = trimAuthInput(data.confirmPassword);
 
-    if (!data.firstName || data.firstName.length < 2 || !/^[a-zA-Z\s]+$/.test(data.firstName)) {
-      newErrors.firstName = "First name must be at least 2 letters";
+    const firstNameError = getPersonNameError(data.firstName, "First name");
+    if (firstNameError) {
+      newErrors.firstName = firstNameError;
     }
-    if (!data.lastName || data.lastName.length < 2 || !/^[a-zA-Z\s]+$/.test(data.lastName)) {
-      newErrors.lastName = "Last name must be at least 2 letters";
+    const lastNameError = getPersonNameError(data.lastName, "Last name");
+    if (lastNameError) {
+      newErrors.lastName = lastNameError;
     }
     if (!data.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
       newErrors.email = "Valid email is required";

@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getEndUser, updateEndUser, type UpdateEndUserInput } from "@/lib/auth/identity";
+import { getPersonNameError } from "@/lib/utils";
 
 type RouteContext = {
   params: Promise<{ userId: string }>;
@@ -31,10 +32,18 @@ export async function PATCH(request: Request, context: RouteContext) {
     const payload: UpdateEndUserInput = {};
 
     if (typeof body.first_name === "string") {
-      payload.first_name = body.first_name;
+      const firstNameError = getPersonNameError(body.first_name, "First name");
+      if (firstNameError) {
+        return NextResponse.json({ error: firstNameError }, { status: 400 });
+      }
+      payload.first_name = body.first_name.trim();
     }
     if (typeof body.last_name === "string") {
-      payload.last_name = body.last_name;
+      const lastNameError = getPersonNameError(body.last_name, "Last name");
+      if (lastNameError) {
+        return NextResponse.json({ error: lastNameError }, { status: 400 });
+      }
+      payload.last_name = body.last_name.trim();
     }
     if (typeof body.role === "string") {
       payload.role = body.role;

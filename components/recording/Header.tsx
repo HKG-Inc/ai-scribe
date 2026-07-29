@@ -12,7 +12,7 @@ import {
   endVisit,
 } from "@/store/slices/recordingSlice";
 import { logout } from "@/store/slices/userSlice";
-import { getInitials } from "@/lib/utils";
+import { getInitials, getPersonNameError } from "@/lib/utils";
 import { SPECIALTIES } from "@/lib/specialties";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -226,12 +226,14 @@ export function UserProfileSidebar() {
   const handleSave = async () => {
     let hasError = false;
 
-    if (!firstName || firstName.length < 2) {
-      setFirstNameError("Min 2 characters");
+    const firstNameValidationError = getPersonNameError(firstName, "First name");
+    if (firstNameValidationError) {
+      setFirstNameError(firstNameValidationError);
       hasError = true;
     }
-    if (!lastName || lastName.length < 2) {
-      setLastNameError("Min 2 characters");
+    const lastNameValidationError = getPersonNameError(lastName, "Last name");
+    if (lastNameValidationError) {
+      setLastNameError(lastNameValidationError);
       hasError = true;
     }
     if (!specialty) {

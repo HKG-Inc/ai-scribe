@@ -82,6 +82,23 @@ export function getInitials(firstName: string, lastName: string): string {
   return `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
 }
 
+/** Letters with optional spaces, hyphens, or apostrophes between name parts (e.g. Mary-Jane, O'Brien). */
+export const PERSON_NAME_PATTERN = /^[a-zA-Z]+(?:[ '\-][a-zA-Z]+)*$/;
+
+export function getPersonNameError(
+  value: string,
+  fieldLabel = "Name",
+): string | null {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.replace(/[ '\-]/g, "").length < 2) {
+    return `${fieldLabel} must be at least 2 letters`;
+  }
+  if (!PERSON_NAME_PATTERN.test(trimmed)) {
+    return `${fieldLabel} can only contain letters, spaces, hyphens, and apostrophes`;
+  }
+  return null;
+}
+
 const DATE_PLACEHOLDERS = new Set([
   "mmddyyyy",
   "ddmmyyyy",

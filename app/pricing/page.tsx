@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { apiFetch } from "@/lib/utils";
+import { apiFetch, cn, getPersonNameError } from "@/lib/utils";
 import {
   Check,
   X,
@@ -22,7 +22,6 @@ import {
 import { toast } from "sonner";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAppSelector } from "@/store/hooks";
-import { cn } from "@/lib/utils";
 
 const countryCodes = [
   { code: "+1", country: "US/CA" },
@@ -111,6 +110,12 @@ export default function PricingPage() {
       !activeFormData.phoneNumber
     ) {
       toast.error("Please fill in all required fields");
+      return;
+    }
+
+    const fullNameError = getPersonNameError(activeFormData.fullName, "Full name");
+    if (fullNameError) {
+      toast.error(fullNameError);
       return;
     }
 
