@@ -106,6 +106,8 @@ export interface RecordingState {
   showUserSidebar: boolean;
   showPremiumBanner: boolean;
   visitMinutesCharged: boolean;
+  medicalNotesFeedbackRating: "up" | "down" | null;
+  ordersFeedbackRating: "up" | "down" | null;
 }
 
 interface ConnectionStatePayload {
@@ -181,6 +183,8 @@ const initialState: RecordingState = {
   showUserSidebar: false,
   showPremiumBanner: true,
   visitMinutesCharged: false,
+  medicalNotesFeedbackRating: null,
+  ordersFeedbackRating: null,
 };
 
 const recordingSlice = createSlice({
@@ -200,6 +204,8 @@ const recordingSlice = createSlice({
       state.reportSectionLoading = createSectionLoading(false);
       state.recordingTime = 0;
       state.visitMinutesCharged = false;
+      state.medicalNotesFeedbackRating = null;
+      state.ordersFeedbackRating = null;
     },
     endVisit() {
       return { ...initialState };
@@ -325,6 +331,12 @@ const recordingSlice = createSlice({
         state.reportData.visitNotes[0] = action.payload;
       }
     },
+    setMedicalNotesFeedbackRating(state, action: PayloadAction<"up" | "down" | null>) {
+      state.medicalNotesFeedbackRating = action.payload;
+    },
+    setOrdersFeedbackRating(state, action: PayloadAction<"up" | "down" | null>) {
+      state.ordersFeedbackRating = action.payload;
+    },
   },
 });
 
@@ -362,6 +374,8 @@ export const {
   setSessionId,
   setVisitMinutesCharged,
   updateVisitNote,
+  setMedicalNotesFeedbackRating,
+  setOrdersFeedbackRating,
 } = recordingSlice.actions;
 
 export default recordingSlice.reducer;

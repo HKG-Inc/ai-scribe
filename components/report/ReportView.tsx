@@ -36,6 +36,8 @@ import {
   endVisit,
   setReportData,
   setReportLoading,
+  setMedicalNotesFeedbackRating,
+  setOrdersFeedbackRating,
   type ReportData,
 } from "@/store/slices/recordingSlice";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -1592,10 +1594,8 @@ export function ReportView() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportWarning, setExportWarning] = useState("");
   const [isEndingVisit, setIsEndingVisit] = useState(false);
-  const [medicalNotesFeedbackRating, setMedicalNotesFeedbackRating] = useState<"up" | "down" | null>(
-    null
-  );
-  const [ordersFeedbackRating, setOrdersFeedbackRating] = useState<"up" | "down" | null>(null);
+  const medicalNotesFeedbackRating = useAppSelector((s) => s.recording.medicalNotesFeedbackRating);
+  const ordersFeedbackRating = useAppSelector((s) => s.recording.ordersFeedbackRating);
 
   const handleBack = () => {
     dispatch(setReportLoading(false));
@@ -1745,14 +1745,14 @@ export function ReportView() {
                 <MedicalNotesTab
                   transcriptMessage={transcriptMessage}
                   feedbackRating={medicalNotesFeedbackRating}
-                  onFeedbackRatingChange={setMedicalNotesFeedbackRating}
+                  onFeedbackRatingChange={(r) => dispatch(setMedicalNotesFeedbackRating(r))}
                 />
               </TabsContent>
               <TabsContent value="orders">
                 <OrdersTab
                   transcriptMessage={transcriptMessage}
                   feedbackRating={ordersFeedbackRating}
-                  onFeedbackRatingChange={setOrdersFeedbackRating}
+                  onFeedbackRatingChange={(r) => dispatch(setOrdersFeedbackRating(r))}
                 />
               </TabsContent>
               <TabsContent value="transcription">
