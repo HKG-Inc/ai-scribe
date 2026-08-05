@@ -927,7 +927,10 @@ function OrdersTab({
       const response = await apiFetch("/api/medications", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: transcriptMessage }),
+        body: JSON.stringify({
+          message: transcriptMessage,
+          current_date: todayMmDdYyyy(),
+        }),
       });
       const data = (await response.json()) as { medication?: unknown[]; error?: string };
       const apiError = getApiError(response, data, "Medication retry failed");
@@ -935,11 +938,7 @@ function OrdersTab({
         throw new Error(apiError);
       }
 
-      const today = new Date().toLocaleDateString("en-US", {
-        month: "2-digit",
-        day: "2-digit",
-        year: "numeric",
-      });
+      const today = todayMmDdYyyy();
 
       const mappedPrescribedMedications = (data.medication || [])
         .map((item) => {

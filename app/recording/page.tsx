@@ -477,7 +477,9 @@ export default function RecordingPage() {
     };
 
     const runMedications = async () => {
-      const result = await callAgentRoute<{ medication?: unknown[] }>("/api/medications");
+      const result = await callAgentRoute<{ medication?: unknown[] }>("/api/medications", {
+        current_date: today,
+      });
       if (!result.ok) {
         console.warn("[generateReport] Medication failed:", result.error);
         finishSection("medication");

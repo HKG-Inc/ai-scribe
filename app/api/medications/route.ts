@@ -6,6 +6,15 @@ export const maxDuration = 300;
 
 interface MedicationRequest {
   message?: string;
+  current_date?: string;
+}
+
+function todayMMDDYYYY(): string {
+  return new Date().toLocaleDateString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  });
 }
 
 type MedicationItem = {
@@ -94,12 +103,20 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json()) as MedicationRequest;
     const message = body.message?.trim();
+    const current_date = body.current_date?.trim() || todayMMDDYYYY();
 
     if (!message) {
       return NextResponse.json({ error: "message is required" }, { status: 400 });
     }
 
-    const agentResponse = await hikigai.invokeAgent("medication-agent", { message }, HIKIGAI_AGENT_TIMEOUT_MS);
+    const agentInput = { message, current_date };
+    console.log("[medication-agent] invoke input:", JSON.stringify(agentInput));
+
+    const agentResponse = await hikigai.invokeAgent(
+      "medication-agent",
+      agentInput,
+      HIKIGAI_AGENT_TIMEOUT_MS
+    );
     console.log("[medication-agent] raw invoke output:", JSON.stringify(agentResponse));
 
     const medication = normalizeMedication(agentResponse);
