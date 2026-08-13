@@ -1,33 +1,31 @@
 "use client";
 
 import { QRCodeSVG } from "qrcode.react";
+import { buildVisitQrPayload } from "@/lib/companion/protocol";
 
 interface QRCodeCardProps {
-  patientId: string;
+  doctorId: string;
   visitId: string;
 }
 
-export function QRCodeCard({ patientId, visitId }: QRCodeCardProps) {
-  const qrData = JSON.stringify({
-    patientId,
-    visitId,
-  });
+export function QRCodeCard({ doctorId, visitId }: QRCodeCardProps) {
+  const qrData = buildVisitQrPayload(doctorId, visitId);
 
   return (
     <div className="w-full">
       <h2 className="text-brand-blue text-lg font-semibold">Companion App QR Code</h2>
       <p className="text-slate-600 text-sm mt-2">
-        Scan this QR code with the companion app to connect your device for microphone access
+        Scan this QR code with the companion app to use the phone as the microphone
       </p>
 
       <div className="flex justify-center my-6">
         <div className="bg-white p-4 rounded-lg">
-          <QRCodeSVG value={qrData} size={200} level="H" />
+          <QRCodeSVG value={qrData} size={192} level="M" />
         </div>
       </div>
 
       <p className="text-sm text-slate-500 text-center">
-        This QR code contains your session information for the companion app
+        This code contains the doctor, visit, and patient ids the companion app needs to join this session
       </p>
     </div>
   );

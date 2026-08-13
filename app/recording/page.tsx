@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { store } from "@/store/index";
@@ -18,9 +18,11 @@ import {
   startReportGeneration,
   patchReportData,
   setReportSectionLoading,
+  setReportLoading,
   setConnectionState,
   setSessionId,
   setSpeechDetected,
+  setTranscription,
   setFormattedTranscription,
   type ReportData,
   type ReportSectionKey,
@@ -38,6 +40,8 @@ import { apiFetch, cleanDateValue, mapFollowUpAppointment } from "@/lib/utils";
 import { normalizeMedicationFrequency } from "@/lib/medication";
 import { normalizeReferrals } from "@/lib/referrals";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
+import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
+import { useCompanionTranscript } from "@/hooks/useCompanionTranscript";
 
 interface AlertItem {
   type: AlertType;
@@ -130,11 +134,20 @@ export default function RecordingPage() {
   const dispatch = useAppDispatch();
   const router = useRouter();
   const recording = useAppSelector((s) => s.recording);
-  const user = useAppSelector((s) => s.user);
+  const doctorId = useCompanionDoctorId();
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [noTranscriptToast, setNoTranscriptToast] = useState(false);
   const [conversationText, setConversationText] = useState("");
   const [liveDraft, setLiveDraft] = useState("");
+  const isRecordingRef = useRef(false);
+  const isPausedRef = useRef(false);
+  const companionDrivenRef = useRef(false);
+  const stoppingRef = useRef(false);
+  const reportGenerationIdRef = useRef(0);
+  const currentViewRef = useRef(recording.currentView);
+  const handleStopRef = useRef<
+    (options?: { lines?: string[]; skipCompanionControl?: boolean }) => Promise<void>
+  >(async () => {});
 
   const pushAlert = (type: AlertType, id: string) => {
     setAlerts((prev) => {
@@ -166,6 +179,72 @@ export default function RecordingPage() {
     },
   });
 
+  const companionTranscript = useCompanionTranscript(recording.visitId, doctorId, {
+    onRecordingChange: (signal) => {
+      const onReportView = currentViewRef.current === "report";
+      if (signal.recording && (!isRecordingRef.current || onReportView)) {
+        stoppingRef.current = false;
+        companionDrivenRef.current = true;
+        reportGenerationIdRef.current += 1;
+        if (signal.lines.length > 0) {
+          dispatch(setTranscription(signal.lines));
+        }
+        dispatch(startRecording());
+        if (signal.paused) {
+          dispatch(pauseRecording());
+        }
+        dispatch(setConnectionState({ isConnected: true, isConnecting: false }));
+        dispatch(setReportLoading(false));
+        dispatch(setCurrentView("recording"));
+        return;
+      }
+
+      if (!companionDrivenRef.current) {
+        return;
+      }
+
+      if (!signal.recording && isRecordingRef.current) {
+        void handleStopRef.current({
+          lines: signal.lines,
+          skipCompanionControl: true,
+        });
+        return;
+      }
+
+      if (signal.paused && !isPausedRef.current) {
+        dispatch(pauseRecording());
+      } else if (!signal.paused && isPausedRef.current && isRecordingRef.current) {
+        dispatch(resumeRecording());
+      }
+    },
+  });
+
+  const usingCompanion = companionTranscript.active;
+  const displayedTranscription = usingCompanion
+    ? companionTranscript.lines
+    : recording.transcription;
+  const displayedLiveDraft = usingCompanion ? companionTranscript.pendingText : liveDraft;
+  const recorderConnected = usingCompanion
+    ? companionTranscript.status === "joined"
+    : recording.isConnected;
+  const recorderConnecting = usingCompanion
+    ? companionTranscript.status === "connecting" ||
+      companionTranscript.status === "authenticating" ||
+      companionTranscript.status === "reconnecting"
+    : recording.isConnecting;
+
+  useEffect(() => {
+    isRecordingRef.current = recording.isRecording;
+  }, [recording.isRecording]);
+
+  useEffect(() => {
+    isPausedRef.current = recording.isPaused;
+  }, [recording.isPaused]);
+
+  useEffect(() => {
+    currentViewRef.current = recording.currentView;
+  }, [recording.currentView]);
+
   // Timer tick when recording and not paused
   useEffect(() => {
     if (!recording.isRecording || recording.isPaused) return;
@@ -182,7 +261,7 @@ export default function RecordingPage() {
       return;
     }
 
-    if (recording.isSpeechDetected) {
+    if (companionDrivenRef.current || recording.isSpeechDetected) {
       setAlerts((prev) => prev.filter((alert) => alert.id !== "no-voice-timeout"));
       return;
     }
@@ -222,6 +301,7 @@ export default function RecordingPage() {
   }, [recording.isRecording]);
 
   const handleStartVisit = () => {
+    companionDrivenRef.current = false;
     const visitId = `visit_${Date.now()}`;
     dispatch(startVisit(visitId));
   };
@@ -231,6 +311,14 @@ export default function RecordingPage() {
       return;
     }
 
+    if (companionTranscript.active && companionTranscript.recording) {
+      companionDrivenRef.current = true;
+      dispatch(startRecording());
+      dispatch(setConnectionState({ isConnected: true, isConnecting: false }));
+      return;
+    }
+
+    companionDrivenRef.current = false;
     const started = await startTranscription();
     if (!started) {
       return;
@@ -240,22 +328,36 @@ export default function RecordingPage() {
   };
 
   const handlePause = () => {
+    if (companionDrivenRef.current) {
+      companionTranscript.sendControl("pause");
+      dispatch(pauseRecording());
+      return;
+    }
+
     pauseSendingAudio();
     dispatch(pauseRecording());
   };
 
   const handleResume = () => {
+    if (companionDrivenRef.current) {
+      companionTranscript.sendControl("resume");
+      dispatch(resumeRecording());
+      return;
+    }
+
     resumeSendingAudio();
     dispatch(resumeRecording());
   };
 
   const generateReportFromMessage = async (
     rawMessage: string,
-    visitIdAtGeneration: string | null = null
+    visitIdAtGeneration: string | null = null,
+    generationId = reportGenerationIdRef.current
   ) => {
     const isStale = () =>
-      visitIdAtGeneration != null &&
-      store.getState().recording.visitId !== visitIdAtGeneration;
+      generationId !== reportGenerationIdRef.current ||
+      (visitIdAtGeneration != null &&
+        store.getState().recording.visitId !== visitIdAtGeneration);
 
     const finishSection = (
       section: ReportSectionKey,
@@ -788,48 +890,108 @@ export default function RecordingPage() {
     ]);
   };
 
-  const handleStop = async () => {
-    const visitIdAtStop = recording.visitId;
-    const recordingTimeAtStop = recording.recordingTime;
-    const visitMinutesChargedAtStop = recording.visitMinutesCharged;
-
-    setAlerts([]);
-    stopAudioCapture();
-    const draft = flushDraft();
-    disconnect();
-
-    if (draft) {
-      dispatch(addTranscription(draft));
-      setLiveDraft("");
-    }
-
-    const transcriptMessage = [...store.getState().recording.transcription]
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .join("\n");
-
-    if (!transcriptMessage) {
-      // Empty visit ends here — deduct cumulative active recording time.
-      await chargeVisitMinutesIfNeeded(
-        dispatch,
-        recordingTimeAtStop,
-        visitMinutesChargedAtStop
-      );
-      // Fully reset state so Start Visit button reappears
-      dispatch(endVisit());
-      setNoTranscriptToast(true);
-      setTimeout(() => setNoTranscriptToast(false), 5000);
+  const handleStop = async (options?: {
+    lines?: string[];
+    skipCompanionControl?: boolean;
+  }) => {
+    if (stoppingRef.current) {
       return;
     }
+    stoppingRef.current = true;
+    const stopGeneration = reportGenerationIdRef.current;
 
-    // Minutes are deducted only at End Visit (or logout), not on Stop,
-    // so Back to Recording can accumulate more active time for the same visit.
-    dispatch(stopRecording());
-    dispatch(startReportGeneration());
-    dispatch(setCurrentView("report"));
+    try {
+      const visitIdAtStop = recording.visitId;
+      const recordingTimeAtStop = recording.recordingTime;
+      const visitMinutesChargedAtStop = recording.visitMinutesCharged;
+      const companionDriven = companionDrivenRef.current;
 
-    await generateReportFromMessage(transcriptMessage, visitIdAtStop);
+      setAlerts([]);
+
+      if (companionDriven) {
+        if (!options?.skipCompanionControl) {
+          companionTranscript.sendControl("stop");
+        }
+      } else {
+        stopAudioCapture();
+        const draft = flushDraft();
+        disconnect();
+        if (draft) {
+          dispatch(addTranscription(draft));
+          setLiveDraft("");
+        }
+      }
+
+      const pending = companionTranscript.pendingText.trim();
+      const sourceLines = (
+        options?.lines ??
+        (companionTranscript.active
+          ? companionTranscript.lines
+          : store.getState().recording.transcription)
+      )
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+
+      if (companionTranscript.active && pending && !sourceLines.includes(pending)) {
+        sourceLines.push(pending);
+      }
+
+      if (companionTranscript.active) {
+        dispatch(setTranscription(sourceLines));
+        setLiveDraft("");
+      }
+
+      const transcriptMessage = sourceLines.join("\n");
+
+      if (!transcriptMessage) {
+        companionTranscript.endVisit();
+        // Empty visit ends here — deduct cumulative active recording time.
+        await chargeVisitMinutesIfNeeded(
+          dispatch,
+          recordingTimeAtStop,
+          visitMinutesChargedAtStop
+        );
+        // Fully reset state so Start Visit button reappears
+        dispatch(endVisit());
+        setNoTranscriptToast(true);
+        setTimeout(() => setNoTranscriptToast(false), 5000);
+        return;
+      }
+
+      const phoneRestarted = () => reportGenerationIdRef.current !== stopGeneration;
+
+      // Phone already started recording again — stay on the recording screen.
+      if (phoneRestarted()) {
+        return;
+      }
+
+      // Minutes are deducted only at End Visit (or logout), not on Stop,
+      // so Back to Recording can accumulate more active time for the same visit.
+      dispatch(stopRecording());
+      if (phoneRestarted()) {
+        dispatch(startRecording());
+        dispatch(setCurrentView("recording"));
+        return;
+      }
+
+      dispatch(startReportGeneration());
+      dispatch(setCurrentView("report"));
+
+      if (phoneRestarted()) {
+        dispatch(setReportLoading(false));
+        dispatch(startRecording());
+        dispatch(setCurrentView("recording"));
+        return;
+      }
+
+      const generationId = ++reportGenerationIdRef.current;
+      await generateReportFromMessage(transcriptMessage, visitIdAtStop, generationId);
+    } finally {
+      stoppingRef.current = false;
+    }
   };
+
+  handleStopRef.current = handleStop;
 
   const handleStartConversation = async () => {
     const message = conversationText.trim();
@@ -849,13 +1011,13 @@ export default function RecordingPage() {
   };
 
   if (recording.currentView === "report") {
-    return <ReportView />;
+    return <ReportView onBeforeEndVisit={() => companionTranscript.endVisit()} />;
   }
 
   return (
     <div className="min-h-screen max-h-screen bg-white flex-col flex">
-      <Header />
-      <UserProfileSidebar />
+      <Header onBeforeEndVisit={() => companionTranscript.endVisit()} />
+      <UserProfileSidebar onBeforeEndVisit={() => companionTranscript.endVisit()} />
 
       {/* Alert banners */}
       {alerts.length > 0 && (
@@ -895,21 +1057,27 @@ export default function RecordingPage() {
               visitId={recording.visitId}
               isRecording={recording.isRecording}
               isPaused={recording.isPaused}
-              isSpeechDetected={recording.isSpeechDetected}
-              isConnected={recording.isConnected}
-              isConnecting={recording.isConnecting}
+              isSpeechDetected={
+                companionDrivenRef.current
+                  ? recording.isRecording && !recording.isPaused
+                  : recording.isSpeechDetected
+              }
+              isConnected={recorderConnected}
+              isConnecting={recorderConnecting}
               recordingTime={recording.recordingTime}
+              companionActive={companionTranscript.active}
+              companionJoined={companionTranscript.status === "joined"}
               onStartVisit={handleStartVisit}
               onStartRecording={handleStartRecording}
               onPause={handlePause}
               onResume={handleResume}
-              onStop={handleStop}
+              onStop={() => void handleStop()}
             />
 
             {/* Right: Transcription */}
             <TranscriptionPanel
-              transcription={recording.transcription}
-              liveDraft={liveDraft}
+              transcription={displayedTranscription}
+              liveDraft={displayedLiveDraft}
               isRecording={recording.isRecording}
               isPaused={recording.isPaused}
               hasVisit={!!recording.visitId}
@@ -925,7 +1093,7 @@ export default function RecordingPage() {
         open={recording.showQRCode}
         onClose={() => dispatch(setShowQRCode(false))}
         visitId={recording.visitId}
-        patientId={user.email}
+        doctorId={doctorId}
       />
 
       {recording.isRecording && recording.currentView === "recording" && (
@@ -933,10 +1101,10 @@ export default function RecordingPage() {
           recordingTime={recording.recordingTime}
           isSpeechDetected={recording.isSpeechDetected}
           isPaused={recording.isPaused}
-          transcriptionText={recording.transcription}
+          transcriptionText={displayedTranscription}
           onPause={handlePause}
           onResume={handleResume}
-          onStop={handleStop}
+          onStop={() => void handleStop()}
         />
       )}
 

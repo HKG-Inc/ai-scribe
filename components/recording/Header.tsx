@@ -17,6 +17,7 @@ import { SPECIALTIES } from "@/lib/specialties";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { chargeVisitMinutesIfNeeded, syncMinutesLeft } from "@/lib/auth/minutes";
+import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
 import {
   isInvalidResetCodeError,
   isValidPassword,
@@ -47,7 +48,7 @@ function InfoTooltip({ text }: { text: string }) {
   );
 }
 
-export function Header() {
+export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } = {}) {
   const dispatch = useAppDispatch();
   const router = useRouter();
   const user = useAppSelector((s) => s.user);
@@ -55,6 +56,8 @@ export function Header() {
     (s) => s.recording
   );
   const [isEndingVisit, setIsEndingVisit] = useState(false);
+  const doctorId = useCompanionDoctorId();
+  const canShowQr = !!visitId && !!doctorId;
 
   const handleEndVisit = async () => {
     if (isEndingVisit) {
@@ -63,6 +66,7 @@ export function Header() {
 
     setIsEndingVisit(true);
     try {
+      onBeforeEndVisit?.();
       await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
       dispatch(endVisit());
     } finally {
@@ -104,13 +108,15 @@ export function Header() {
 
         {visitId && (
           <>
-            <button
-              onClick={() => dispatch(setShowQRCode(true))}
-              className="hidden sm:flex text-brand-blue hover:text-white hover:bg-brand-blue border border-brand-blue rounded-full px-3 sm:px-4 text-xs sm:text-sm h-8 sm:h-9 items-center transition-colors"
-            >
-              <QrCode className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
-              <span className="hidden md:inline">QR Code</span>
-            </button>
+            {canShowQr && (
+              <button
+                onClick={() => dispatch(setShowQRCode(true))}
+                className="hidden sm:flex text-brand-blue hover:text-white hover:bg-brand-blue border border-brand-blue rounded-full px-3 sm:px-4 text-xs sm:text-sm h-8 sm:h-9 items-center transition-colors"
+              >
+                <QrCode className="h-3 w-3 sm:h-4 sm:w-4 mr-1 sm:mr-2" />
+                <span className="hidden md:inline">QR Code</span>
+              </button>
+            )}
 
             <button
               onClick={() => void handleEndVisit()}
@@ -141,7 +147,11 @@ export function Header() {
   );
 }
 
-export function UserProfileSidebar() {
+export function UserProfileSidebar({
+  onBeforeEndVisit,
+}: {
+  onBeforeEndVisit?: () => void;
+} = {}) {
   const dispatch = useAppDispatch();
   const router = useRouter();
   const user = useAppSelector((s) => s.user);
@@ -447,6 +457,7 @@ export function UserProfileSidebar() {
       // Continue local logout even if remote revoke fails.
     }
     clearIdentitySession();
+    onBeforeEndVisit?.();
     await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
     dispatch(logout());
     dispatch(endVisit());

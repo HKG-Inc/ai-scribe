@@ -1,6 +1,10 @@
 import type { AppDispatch } from "@/store";
 import { setUser } from "@/store/slices/userSlice";
 import type { EndUserProfile, UpdateEndUserInput } from "@/lib/auth/identity";
+import {
+  cacheCompanionDoctorId,
+  resolveCompanionDoctorIdFromProfile,
+} from "@/lib/auth/doctorId";
 import { getIdentitySession } from "@/lib/auth/session";
 import { apiFetch } from "@/lib/utils";
 import { toUserFacingApiError } from "@/lib/api-errors";
@@ -51,5 +55,15 @@ export async function syncEndUserProfile(dispatch: AppDispatch): Promise<EndUser
 
   const profile = await fetchEndUserProfile(userId);
   dispatch(setUser(mapEndUserToUserFields(profile)));
+  const companionDoctor = resolveCompanionDoctorIdFromProfile(profile);
+  if (companionDoctor.doctorId) {
+    cacheCompanionDoctorId(companionDoctor.doctorId);
+  }
+  console.log("[identity] companion doctorId", {
+    userId,
+    companionDoctorId: companionDoctor.doctorId,
+    source: companionDoctor.source,
+    metadata: profile.metadata,
+  });
   return profile;
 }

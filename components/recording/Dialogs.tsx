@@ -7,11 +7,11 @@ interface QRCodeDialogProps {
   open: boolean;
   onClose: () => void;
   visitId: string | null;
-  patientId: string;
+  doctorId: string;
 }
 
-export function QRCodeDialog({ open, onClose, visitId, patientId }: QRCodeDialogProps) {
-  if (!visitId) return null;
+export function QRCodeDialog({ open, onClose, visitId, doctorId }: QRCodeDialogProps) {
+  if (!visitId || !doctorId) return null;
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -20,7 +20,7 @@ export function QRCodeDialog({ open, onClose, visitId, patientId }: QRCodeDialog
         hiddenTitle="Companion App QR Code"
         hiddenDescription="Scan this QR code with the companion app to connect your device for microphone access"
       >
-        <QRCodeCard patientId={patientId} visitId={visitId} />
+        <QRCodeCard doctorId={doctorId} visitId={visitId} />
       </DialogContent>
     </Dialog>
   );

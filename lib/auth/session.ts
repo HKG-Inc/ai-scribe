@@ -95,6 +95,11 @@ export function setIdentitySession(session: IdentitySession): void {
 export function clearIdentitySession(): void {
   if (!canUseStorage()) return;
   localStorage.removeItem(SESSION_KEY);
+  try {
+    sessionStorage.removeItem("hikigai.companion.doctorId");
+  } catch {
+    // ignore
+  }
 }
 
 export function hasValidIdentitySession(session = getIdentitySession()): boolean {

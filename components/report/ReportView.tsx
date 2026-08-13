@@ -1582,7 +1582,7 @@ function TranscriptionTab() {
   );
 }
 
-export function ReportView() {
+export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } = {}) {
   const dispatch = useAppDispatch();
   const router = useRouter();
   const pathname = usePathname();
@@ -1611,6 +1611,7 @@ export function ReportView() {
 
     setIsEndingVisit(true);
     try {
+      onBeforeEndVisit?.();
       await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
       dispatch(endVisit());
       if (isVisitDetailsRoute) {

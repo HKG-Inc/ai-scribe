@@ -13,6 +13,8 @@ interface RecorderPanelProps {
   isConnected: boolean;
   isConnecting: boolean;
   recordingTime: number;
+  companionActive?: boolean;
+  companionJoined?: boolean;
   onStartVisit: () => void;
   onStartRecording: () => void;
   onPause: () => void;
@@ -28,6 +30,8 @@ export function RecorderPanel({
   isConnected,
   isConnecting,
   recordingTime,
+  companionActive = false,
+  companionJoined = false,
   onStartVisit,
   onStartRecording,
   onPause,
@@ -94,8 +98,14 @@ export function RecorderPanel({
 
         {/* Connection status or timer */}
         {!isRecording && (
-          <div className="text-base text-slate-500 mb-5 sm:mb-6">
-            {isConnecting ? "Starting transcription…" : "Ready to record"}
+          <div className="text-base text-slate-500 mb-5 sm:mb-6 text-center">
+            {isConnecting
+              ? "Starting transcription…"
+              : companionActive
+                ? "Companion phone connected"
+                : companionJoined
+                  ? "Ready to record — scan QR to use the companion app"
+                  : "Ready to record"}
           </div>
         )}
 
