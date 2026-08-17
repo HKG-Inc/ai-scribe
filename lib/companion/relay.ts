@@ -2,6 +2,7 @@ import {
   HELLO_INTERVAL_MS,
   RELAY_FATAL_CLOSE_CODES,
   RELAY_MAX_RECONNECT_ATTEMPTS,
+  TRANSCRIPT_EVENTS,
   TRANSCRIPT_KIND,
   WEB_SENDER,
   relayReconnectDelayMs,
@@ -230,7 +231,7 @@ export class VisitTranscriptRelay {
   private startHello() {
     this.stopHello();
     this.helloTimer = setInterval(() => {
-      this.publish("transcript.hello");
+      this.publish(TRANSCRIPT_EVENTS.hello);
     }, HELLO_INTERVAL_MS);
   }
 

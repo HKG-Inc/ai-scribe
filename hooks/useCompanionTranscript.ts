@@ -5,6 +5,7 @@ import {
   asBoolean,
   asString,
   asStringArray,
+  TRANSCRIPT_EVENTS,
   transcriptRelayConfig,
   type CompanionRecordingSignal,
   type RecordingControlAction,
@@ -16,6 +17,8 @@ import { VisitTranscriptRelay } from "@/lib/companion/relay";
 
 type UseCompanionTranscriptOptions = {
   onRecordingChange?: (signal: CompanionRecordingSignal) => void;
+  /** Companion ended the visit from the phone. Do not re-publish visit.ended. */
+  onVisitEnded?: () => void;
 };
 
 export function useCompanionTranscript(
@@ -36,8 +39,10 @@ export function useCompanionTranscript(
   const pausedRef = useRef(false);
   const relayRef = useRef<VisitTranscriptRelay | null>(null);
   const onRecordingChangeRef = useRef(options?.onRecordingChange);
+  const onVisitEndedRef = useRef(options?.onVisitEnded);
 
   onRecordingChangeRef.current = options?.onRecordingChange;
+  onVisitEndedRef.current = options?.onVisitEnded;
 
   const resetLocalState = useCallback(() => {
     linesRef.current = [];
@@ -74,7 +79,7 @@ export function useCompanionTranscript(
       setActive(true);
       setLastFrameAt(payload.sentAt || Date.now());
 
-      if (payload.event === "transcript.state") {
+      if (payload.event === TRANSCRIPT_EVENTS.state) {
         const nextLines = asStringArray(payload.data.lines);
         const nextPending = asString(payload.data.pending);
         const nextRecording = asBoolean(payload.data.recording);
@@ -86,17 +91,23 @@ export function useCompanionTranscript(
         return;
       }
 
-      if (payload.event === "transcript.partial") {
+      if (payload.event === TRANSCRIPT_EVENTS.partial) {
         setPendingText(asString(payload.data.pending));
         return;
       }
 
-      if (payload.event === "transcript.stopped") {
+      if (payload.event === TRANSCRIPT_EVENTS.stopped) {
         const nextLines = asStringArray(payload.data.lines);
         linesRef.current = nextLines;
         setLines(nextLines);
         setPendingText("");
         emitRecordingChange(false, false, nextLines);
+        return;
+      }
+
+      if (payload.event === TRANSCRIPT_EVENTS.visitEnded) {
+        emitRecordingChange(false, false, linesRef.current);
+        onVisitEndedRef.current?.();
       }
     },
     [emitRecordingChange]
@@ -120,7 +131,7 @@ export function useCompanionTranscript(
       callbacks: {
         onStatus: setStatus,
         onReady: () => {
-          relay.publish("transcript.hello");
+          relay.publish(TRANSCRIPT_EVENTS.hello);
         },
         onFrame: handleFrame,
         onError: (message) => {
@@ -142,11 +153,11 @@ export function useCompanionTranscript(
   }, [visitId, doctorId, handleFrame, resetLocalState]);
 
   const sendControl = useCallback((action: RecordingControlAction) => {
-    relayRef.current?.publish("recording.control", { action });
+    relayRef.current?.publish(TRANSCRIPT_EVENTS.control, { action });
   }, []);
 
   const endVisit = useCallback((reason: VisitEndedReason = "ended-by-doctor") => {
-    relayRef.current?.publish("visit.ended", { reason });
+    relayRef.current?.publish(TRANSCRIPT_EVENTS.visitEnded, { reason });
   }, []);
 
   return {

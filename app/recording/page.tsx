@@ -143,6 +143,7 @@ export default function RecordingPage() {
   const isPausedRef = useRef(false);
   const companionDrivenRef = useRef(false);
   const stoppingRef = useRef(false);
+  const endingVisitRef = useRef(false);
   const reportGenerationIdRef = useRef(0);
   const currentViewRef = useRef(recording.currentView);
   const handleStopRef = useRef<
@@ -180,7 +181,29 @@ export default function RecordingPage() {
   });
 
   const companionTranscript = useCompanionTranscript(recording.visitId, doctorId, {
+    onVisitEnded: () => {
+      if (endingVisitRef.current) {
+        return;
+      }
+      endingVisitRef.current = true;
+      companionDrivenRef.current = false;
+      if (isRecordingRef.current) {
+        stopAudioCapture();
+        disconnect();
+      }
+      const state = store.getState().recording;
+      void chargeVisitMinutesIfNeeded(
+        dispatch,
+        state.recordingTime,
+        state.visitMinutesCharged
+      ).then(() => {
+        dispatch(endVisit());
+      });
+    },
     onRecordingChange: (signal) => {
+      if (endingVisitRef.current) {
+        return;
+      }
       const onReportView = currentViewRef.current === "report";
       if (signal.recording && (!isRecordingRef.current || onReportView)) {
         stoppingRef.current = false;
@@ -245,6 +268,12 @@ export default function RecordingPage() {
     currentViewRef.current = recording.currentView;
   }, [recording.currentView]);
 
+  useEffect(() => {
+    if (!recording.visitId) {
+      endingVisitRef.current = false;
+    }
+  }, [recording.visitId]);
+
   // Timer tick when recording and not paused
   useEffect(() => {
     if (!recording.isRecording || recording.isPaused) return;
@@ -302,6 +331,7 @@ export default function RecordingPage() {
 
   const handleStartVisit = () => {
     companionDrivenRef.current = false;
+    endingVisitRef.current = false;
     const visitId = `visit_${Date.now()}`;
     dispatch(startVisit(visitId));
   };
@@ -944,6 +974,7 @@ export default function RecordingPage() {
       const transcriptMessage = sourceLines.join("\n");
 
       if (!transcriptMessage) {
+        endingVisitRef.current = true;
         companionTranscript.endVisit();
         // Empty visit ends here — deduct cumulative active recording time.
         await chargeVisitMinutesIfNeeded(
@@ -993,6 +1024,27 @@ export default function RecordingPage() {
 
   handleStopRef.current = handleStop;
 
+  /**
+   * Same order as CarePilot's End Visit: stop the phone's recording first,
+   * then publish `visit.ended` before any local teardown that kills the relay.
+   */
+  const releaseCompanionVisit = () => {
+    endingVisitRef.current = true;
+    if (companionDrivenRef.current) {
+      companionTranscript.sendControl("stop");
+      companionDrivenRef.current = false;
+    } else if (isRecordingRef.current) {
+      stopAudioCapture();
+      const draft = flushDraft();
+      disconnect();
+      if (draft) {
+        dispatch(addTranscription(draft));
+        setLiveDraft("");
+      }
+    }
+    companionTranscript.endVisit();
+  };
+
   const handleStartConversation = async () => {
     const message = conversationText.trim();
     if (!message) return;
@@ -1011,13 +1063,13 @@ export default function RecordingPage() {
   };
 
   if (recording.currentView === "report") {
-    return <ReportView onBeforeEndVisit={() => companionTranscript.endVisit()} />;
+    return <ReportView onBeforeEndVisit={releaseCompanionVisit} />;
   }
 
   return (
     <div className="min-h-screen max-h-screen bg-white flex-col flex">
-      <Header onBeforeEndVisit={() => companionTranscript.endVisit()} />
-      <UserProfileSidebar onBeforeEndVisit={() => companionTranscript.endVisit()} />
+      <Header onBeforeEndVisit={releaseCompanionVisit} />
+      <UserProfileSidebar onBeforeEndVisit={releaseCompanionVisit} />
 
       {/* Alert banners */}
       {alerts.length > 0 && (

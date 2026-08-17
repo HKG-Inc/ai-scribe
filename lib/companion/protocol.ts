@@ -22,7 +22,37 @@ export type TranscriptRelayStatus =
 
 export type RecordingControlAction = "pause" | "resume" | "stop";
 
+/**
+ * Why the visit ended. Carried for the companion's logs and for future wording
+ * on the phone; it has no effect on what the phone does today.
+ */
 export type VisitEndedReason = "ended-by-doctor";
+
+/**
+ * Wire events on the companion relay. Same contract as CarePilot
+ * (`lib/models/visitTranscriptRelay.ts`).
+ */
+export const TRANSCRIPT_EVENTS = {
+  /** Web → companion: "I'm here, send me your current transcript." */
+  hello: "transcript.hello",
+  /** Companion → web: full snapshot. Authoritative; replaces everything. */
+  state: "transcript.state",
+  /** Companion → web: the in-progress utterance only. */
+  partial: "transcript.partial",
+  /** Companion → web: recording ended, with the final lines. */
+  stopped: "transcript.stopped",
+  /**
+   * Web → companion: pause/resume/stop the phone's recording. The phone
+   * applies it and then publishes its resulting state.
+   */
+  control: "recording.control",
+  /**
+   * Web → companion: the doctor pressed End Visit; this consultation is
+   * over. Distinct from a `stop` control, which only ends the recording and
+   * leaves the phone on the visit ready to record again.
+   */
+  visitEnded: "visit.ended",
+} as const;
 
 export type TranscriptStateData = {
   lines: string[];
@@ -54,12 +84,7 @@ export type CompanionRecordingSignal = {
 };
 
 export type VisitTranscriptEvent =
-  | "transcript.state"
-  | "transcript.partial"
-  | "transcript.stopped"
-  | "transcript.hello"
-  | "recording.control"
-  | "visit.ended";
+  (typeof TRANSCRIPT_EVENTS)[keyof typeof TRANSCRIPT_EVENTS];
 
 export type VisitTranscriptPayload = {
   kind: typeof TRANSCRIPT_KIND;
