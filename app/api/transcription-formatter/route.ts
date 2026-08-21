@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await hikigai.invokeAgent("hikigai-transcription-agent", {
+    const result = await hikigai.invokeAgent("transcription-agent", {
       transcription: message,
     }, HIKIGAI_AGENT_TIMEOUT_MS);
     console.log("[transcription-formatter] raw invoke output:", JSON.stringify(result));
