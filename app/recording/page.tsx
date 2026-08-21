@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { store } from "@/store/index";
 import {
@@ -24,6 +23,9 @@ import {
   setSpeechDetected,
   setTranscription,
   setFormattedTranscription,
+  setRecordingMode,
+  setShowModeWarning,
+  setNormalModeStarted,
   type ReportData,
   type ReportSectionKey,
 } from "@/store/slices/recordingSlice";
@@ -32,11 +34,11 @@ import { AlertBanners } from "@/components/recording/AlertBanners";
 import { RecorderPanel } from "@/components/recording/RecorderPanel";
 import { TranscriptionPanel } from "@/components/recording/TranscriptionPanel";
 import { PictureInPicture } from "@/components/recording/PictureInPicture";
-import { QRCodeDialog } from "@/components/recording/Dialogs";
+import { QRCodeDialog, ModeWarningDialog } from "@/components/recording/Dialogs";
 import { ReportView } from "@/components/report/ReportView";
 import type { AlertType } from "@/components/recording/AlertBanners";
 import { chargeVisitMinutesIfNeeded } from "@/lib/auth/minutes";
-import { apiFetch, cleanDateValue, mapFollowUpAppointment } from "@/lib/utils";
+import { apiFetch, cleanDateValue, cn, mapFollowUpAppointment } from "@/lib/utils";
 import { normalizeMedicationFrequency } from "@/lib/medication";
 import { normalizeReferrals } from "@/lib/referrals";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
@@ -132,12 +134,10 @@ function extractSpeakerLines(payload: unknown): string[] {
 
 export default function RecordingPage() {
   const dispatch = useAppDispatch();
-  const router = useRouter();
   const recording = useAppSelector((s) => s.recording);
   const doctorId = useCompanionDoctorId();
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [noTranscriptToast, setNoTranscriptToast] = useState(false);
-  const [conversationText, setConversationText] = useState("");
   const [liveDraft, setLiveDraft] = useState("");
   const isRecordingRef = useRef(false);
   const isPausedRef = useRef(false);
@@ -339,6 +339,10 @@ export default function RecordingPage() {
   const handleStartRecording = async () => {
     if (recording.isRecording || recording.isConnecting) {
       return;
+    }
+
+    if (recording.recordingMode === "normal") {
+      dispatch(setNormalModeStarted(true));
     }
 
     if (companionTranscript.active && companionTranscript.recording) {
@@ -972,8 +976,10 @@ export default function RecordingPage() {
       }
 
       const transcriptMessage = sourceLines.join("\n");
+      const qaHistory = store.getState().recording.qaHistory;
+      const hasQuestionnaireContent = qaHistory.length > 0;
 
-      if (!transcriptMessage) {
+      if (!transcriptMessage && !hasQuestionnaireContent) {
         endingVisitRef.current = true;
         companionTranscript.endVisit();
         // Empty visit ends here — deduct cumulative active recording time.
@@ -987,6 +993,21 @@ export default function RecordingPage() {
         setNoTranscriptToast(true);
         setTimeout(() => setNoTranscriptToast(false), 5000);
         return;
+      }
+
+      // Questionnaire-only path: synthesize a transcript from Q&A for report agents.
+      const effectiveTranscript =
+        transcriptMessage ||
+        qaHistory
+          .map((qa) => {
+            const answer =
+              qa.responseTranslated?.english_translation || qa.responseEn || "Skipped";
+            return `Doctor: ${qa.questionEn}\nPatient: ${answer}`;
+          })
+          .join("\n");
+
+      if (!transcriptMessage && hasQuestionnaireContent) {
+        dispatch(setTranscription(effectiveTranscript.split("\n").filter(Boolean)));
       }
 
       const phoneRestarted = () => reportGenerationIdRef.current !== stopGeneration;
@@ -1016,7 +1037,7 @@ export default function RecordingPage() {
       }
 
       const generationId = ++reportGenerationIdRef.current;
-      await generateReportFromMessage(transcriptMessage, visitIdAtStop, generationId);
+      await generateReportFromMessage(effectiveTranscript, visitIdAtStop, generationId);
     } finally {
       stoppingRef.current = false;
     }
@@ -1045,21 +1066,22 @@ export default function RecordingPage() {
     companionTranscript.endVisit();
   };
 
-  const handleStartConversation = async () => {
-    const message = conversationText.trim();
-    if (!message) return;
-
-    const visitId = `visit_${Date.now()}`;
-    dispatch(startVisit(visitId));
-    dispatch(addTranscription(message));
-    dispatch(startReportGeneration());
-    router.push("/visit-details");
-
-    await generateReportFromMessage(message);
-  };
-
   const dismissAlert = (id: string) => {
     setAlerts((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const handleModeSwitch = (mode: "normal" | "conversational") => {
+    if (recording.isRecording) return;
+
+    if (mode === "normal" && recording.conversationalModeStarted) {
+      dispatch(setShowModeWarning(true));
+      return;
+    }
+    if (mode === "conversational" && recording.normalModeStarted) {
+      dispatch(setShowModeWarning(true));
+      return;
+    }
+    dispatch(setRecordingMode(mode));
   };
 
   if (recording.currentView === "report") {
@@ -1080,64 +1102,73 @@ export default function RecordingPage() {
 
       {/* Main content */}
       <main className="container mx-auto pt-2 pb-6 px-6 flex-1 flex flex-col">
-        {recording.recordingMode === "conversational" ? (
-          <div className="w-full flex-1 flex items-start justify-center">
-            <div className="w-full max-w-3xl bg-white rounded-2xl p-6 sm:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.06)] border border-slate-100">
-              <h2 className="text-xl font-semibold text-slate-800 mb-2">Conversation Input</h2>
-              <p className="text-sm text-slate-500 mb-4">
-                Paste or type the complete doctor-patient conversation below.
-              </p>
-              <textarea
-                value={conversationText}
-                onChange={(e) => setConversationText(e.target.value)}
-                placeholder="Doctor: Good morning...\nPatient: I have a headache..."
-                className="w-full min-h-[280px] p-4 rounded-xl border border-slate-200 text-sm leading-relaxed resize-y focus:outline-none focus:border-brand-blue focus:ring-1 focus:ring-brand-blue"
-              />
+        {recording.visitId && (
+          <div className="flex justify-center mb-6">
+            <div className="inline-flex rounded-full p-1 shadow-[0_8px_30px_rgb(0,0,0,0.06)]">
               <button
-                onClick={handleStartConversation}
-                disabled={!conversationText.trim()}
-                className="mt-4 w-full sm:w-auto px-6 h-12 bg-brand-green hover:bg-opacity-90 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-xl text-base font-medium shadow-md hover:shadow-lg transition-all"
+                onClick={() => handleModeSwitch("normal")}
+                disabled={recording.isRecording}
+                className={cn(
+                  "px-4 py-1 rounded-full text-xs font-medium transition-all duration-200",
+                  recording.recordingMode === "normal"
+                    ? "bg-brand-green text-white shadow-sm"
+                    : "text-slate-500 hover:text-slate-700",
+                  recording.isRecording && "cursor-not-allowed opacity-60"
+                )}
               >
-                Start
+                Normal Mode
+              </button>
+              <button
+                onClick={() => handleModeSwitch("conversational")}
+                disabled={recording.isRecording}
+                className={cn(
+                  "px-4 py-1 rounded-full text-xs font-medium transition-all duration-200",
+                  recording.recordingMode === "conversational"
+                    ? "bg-brand-green text-white shadow-sm"
+                    : "text-slate-500 hover:text-slate-700",
+                  recording.isRecording && "cursor-not-allowed opacity-60"
+                )}
+              >
+                Conversational Mode
               </button>
             </div>
           </div>
-        ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full flex-1 min-h-0">
-            {/* Left: Recorder */}
-            <RecorderPanel
-              visitId={recording.visitId}
-              isRecording={recording.isRecording}
-              isPaused={recording.isPaused}
-              isSpeechDetected={
-                companionDrivenRef.current
-                  ? recording.isRecording && !recording.isPaused
-                  : recording.isSpeechDetected
-              }
-              isConnected={recorderConnected}
-              isConnecting={recorderConnecting}
-              recordingTime={recording.recordingTime}
-              companionActive={companionTranscript.active}
-              companionJoined={companionTranscript.status === "joined"}
-              onStartVisit={handleStartVisit}
-              onStartRecording={handleStartRecording}
-              onPause={handlePause}
-              onResume={handleResume}
-              onStop={() => void handleStop()}
-            />
-
-            {/* Right: Transcription */}
-            <TranscriptionPanel
-              transcription={displayedTranscription}
-              liveDraft={displayedLiveDraft}
-              isRecording={recording.isRecording}
-              isPaused={recording.isPaused}
-              hasVisit={!!recording.visitId}
-              hasReport={!!recording.reportData}
-              onViewReport={() => dispatch(setCurrentView("report"))}
-            />
-          </div>
         )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 w-full flex-1 min-h-0">
+          <RecorderPanel
+            visitId={recording.visitId}
+            isRecording={recording.isRecording}
+            isPaused={recording.isPaused}
+            isSpeechDetected={
+              companionDrivenRef.current
+                ? recording.isRecording && !recording.isPaused
+                : recording.isSpeechDetected
+            }
+            isConnected={recorderConnected}
+            isConnecting={recorderConnecting}
+            recordingTime={recording.recordingTime}
+            companionActive={companionTranscript.active}
+            companionJoined={companionTranscript.status === "joined"}
+            recordingMode={recording.recordingMode}
+            onStartVisit={handleStartVisit}
+            onStartRecording={handleStartRecording}
+            onPause={handlePause}
+            onResume={handleResume}
+            onStop={() => void handleStop()}
+          />
+
+          <TranscriptionPanel
+            transcription={displayedTranscription}
+            liveDraft={displayedLiveDraft}
+            isRecording={recording.isRecording}
+            isPaused={recording.isPaused}
+            hasVisit={!!recording.visitId}
+            hasReport={!!recording.reportData}
+            recordingMode={recording.recordingMode}
+            onViewReport={() => dispatch(setCurrentView("report"))}
+          />
+        </div>
       </main>
 
       {/* Dialogs */}
@@ -1146,6 +1177,12 @@ export default function RecordingPage() {
         onClose={() => dispatch(setShowQRCode(false))}
         visitId={recording.visitId}
         doctorId={doctorId}
+      />
+
+      <ModeWarningDialog
+        open={recording.showModeWarning}
+        onClose={() => dispatch(setShowModeWarning(false))}
+        currentMode={recording.recordingMode}
       />
 
       {recording.isRecording && recording.currentView === "recording" && (

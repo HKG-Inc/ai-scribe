@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  Activity,
   ArrowLeft,
   Download,
   X,
@@ -1526,6 +1527,7 @@ function OrdersTab({
 function TranscriptionTab() {
   const transcription = useAppSelector((s) => s.recording.transcription);
   const formattedTranscription = useAppSelector((s) => s.recording.formattedTranscription);
+  const qaHistory = useAppSelector((s) => s.recording.qaHistory);
   const sectionLoading = useAppSelector((s) => s.recording.reportSectionLoading);
   const displayTranscription = formattedTranscription ?? transcription;
 
@@ -1555,29 +1557,98 @@ function TranscriptionTab() {
         <div className="bg-slate-50 rounded-xl p-4 max-h-[60vh] overflow-y-auto border border-slate-100">
           {sectionLoading.transcription ? (
             <SectionBodyLoader />
-          ) : speakerRows.length === 0 ? (
-            <p className="text-slate-400 italic text-center">No transcription available</p>
           ) : (
-            speakerRows.map((row) => (
-              <div key={row.key} className="flex items-start gap-3 mb-4">
-                <div
-                  className={`h-9 w-9 rounded-full text-white text-sm font-semibold flex items-center justify-center flex-shrink-0 ${
-                    row.tone === "doctor" ? "bg-brand-blue" : "bg-brand-orange"
-                  }`}
-                >
-                  {row.tone === "doctor" ? "D" : "P"}
+            <>
+              {qaHistory.length > 0 && (
+                <div className="mb-6 space-y-4">
+                  <h4 className="text-sm font-semibold text-slate-600">Questionnaire</h4>
+                  {qaHistory.map((qa, idx) => (
+                    <div key={idx} className="space-y-2 pb-3 border-b border-slate-200">
+                      <p className="text-sm font-semibold text-brand-green">Doctor</p>
+                      <p className="text-base text-slate-700">{qa.questionEn}</p>
+                      {qa.questionTranslated && (
+                        <p className="text-sm text-slate-500 italic">{qa.questionTranslated}</p>
+                      )}
+                      <p className="text-sm font-semibold text-brand-orange mt-2">Patient</p>
+                      <p className="text-base text-slate-700">
+                        {qa.responseTranslated?.english_translation || (
+                          <span className="text-slate-400 italic">Skipped</span>
+                        )}
+                      </p>
+                    </div>
+                  ))}
                 </div>
-                <div className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm">
-                  <p className={`text-lg font-semibold ${row.tone === "doctor" ? "text-brand-blue" : "text-brand-orange"}`}>
-                    {row.speaker}
-                  </p>
-                  <p className="text-base leading-relaxed text-slate-700">{row.message}</p>
-                </div>
-              </div>
-            ))
+              )}
+              {speakerRows.length === 0 && qaHistory.length === 0 ? (
+                <p className="text-slate-400 italic text-center">No transcription available</p>
+              ) : (
+                speakerRows.map((row) => (
+                  <div key={row.key} className="flex items-start gap-3 mb-4">
+                    <div
+                      className={`h-9 w-9 rounded-full text-white text-sm font-semibold flex items-center justify-center flex-shrink-0 ${
+                        row.tone === "doctor" ? "bg-brand-blue" : "bg-brand-orange"
+                      }`}
+                    >
+                      {row.tone === "doctor" ? "D" : "P"}
+                    </div>
+                    <div className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm">
+                      <p className={`text-lg font-semibold ${row.tone === "doctor" ? "text-brand-blue" : "text-brand-orange"}`}>
+                        {row.speaker}
+                      </p>
+                      <p className="text-base leading-relaxed text-slate-700">{row.message}</p>
+                    </div>
+                  </div>
+                ))
+              )}
+            </>
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+function MRIReportTab() {
+  const mriReport = useAppSelector((s) => s.recording.mriReport);
+
+  if (!mriReport?.data?.studies?.length) {
+    return (
+      <div className="p-8 text-center text-slate-500">
+        <Activity className="h-12 w-12 mx-auto mb-3 text-slate-300" />
+        <p>No MRI studies available</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3 sm:p-6 space-y-4">
+      {mriReport.data.studies.map((study, studyIndex) => (
+        <div
+          key={studyIndex}
+          className="border border-brand-blue/10 rounded-lg p-5 bg-gradient-to-br from-brand-blue/5 to-white"
+        >
+          <h4 className="font-semibold text-brand-blue text-base mb-2">
+            {study.region?.replace(/_/g, " ").toUpperCase() || "MRI Study"}
+          </h4>
+          {study.human_label && (
+            <p className="text-xs text-slate-500 mb-3">{study.human_label}</p>
+          )}
+          {study.findings?.length ? (
+            study.findings.map((finding, findingIndex) => (
+              <div key={findingIndex} className="flex items-start gap-3 mb-2">
+                <div className="font-medium text-sm text-slate-800">
+                  {finding.pathology || "Unknown pathology"}
+                </div>
+                {finding.details && (
+                  <div className="text-sm text-slate-600">- {finding.details}</div>
+                )}
+              </div>
+            ))
+          ) : (
+            <p className="text-sm text-slate-500 italic">No findings recorded</p>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1588,6 +1659,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
   const pathname = usePathname();
   const isVisitDetailsRoute = withoutBasePath(pathname ?? "") === "/visit-details";
   const { reportData, visitId, transcription, formattedTranscription, recordingTime, visitMinutesCharged } = useAppSelector((s) => s.recording);
+  const mriReport = useAppSelector((s) => s.recording.mriReport);
   const transcriptMessage = buildTranscriptMessage(transcription);
   const displayTranscription = formattedTranscription ?? transcription;
   const [isExporting, setIsExporting] = useState(false);
@@ -1595,6 +1667,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
   const [isEndingVisit, setIsEndingVisit] = useState(false);
   const medicalNotesFeedbackRating = useAppSelector((s) => s.recording.medicalNotesFeedbackRating);
   const ordersFeedbackRating = useAppSelector((s) => s.recording.ordersFeedbackRating);
+  const tabCount = mriReport?.data?.studies?.length ? 4 : 3;
 
   const handleBack = () => {
     dispatch(setReportLoading(false));
@@ -1725,7 +1798,11 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
           <div className="bg-white rounded-2xl shadow-[0_8px_30px_rgb(0,0,0,0.06)] overflow-hidden">
             <Tabs defaultValue="medical-notes">
               <div className="overflow-x-auto px-2 sm:px-4 pt-2 pb-2">
-                <TabsList className="grid grid-cols-3 bg-transparent rounded-lg p-1 gap-1 sm:gap-2 h-auto w-full">
+                <TabsList
+                  className={`grid bg-transparent rounded-lg p-1 gap-1 sm:gap-2 h-auto w-full ${
+                    tabCount === 4 ? "grid-cols-4" : "grid-cols-3"
+                  }`}
+                >
                   <TabsTrigger value="medical-notes">
                     <ClipboardList className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                     <span className="truncate">Medical Notes</span>
@@ -1738,6 +1815,12 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
                     <MessageSquare className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
                     <span className="truncate">Transcription</span>
                   </TabsTrigger>
+                  {!!mriReport?.data?.studies?.length && (
+                    <TabsTrigger value="mri-report">
+                      <Activity className="h-3.5 w-3.5 sm:h-4 sm:w-4 shrink-0" />
+                      <span className="truncate">MRI Report</span>
+                    </TabsTrigger>
+                  )}
                 </TabsList>
               </div>
 
@@ -1758,6 +1841,11 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
               <TabsContent value="transcription">
                 <TranscriptionTab />
               </TabsContent>
+              {!!mriReport?.data?.studies?.length && (
+                <TabsContent value="mri-report">
+                  <MRIReportTab />
+                </TabsContent>
+              )}
             </Tabs>
           </div>
         </main>

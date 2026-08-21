@@ -4,6 +4,9 @@ import { motion } from "framer-motion";
 import Image from "next/image";
 import { Mic, Play, Pause } from "lucide-react";
 import { formatTime, withBasePath } from "@/lib/utils";
+import { ConversationalControls } from "@/components/recording/ConversationalControls";
+import UploadMRIButton from "@/components/recording/UploadMRIButton";
+import type { RecordingMode } from "@/store/slices/recordingSlice";
 
 interface RecorderPanelProps {
   visitId: string | null;
@@ -15,6 +18,8 @@ interface RecorderPanelProps {
   recordingTime: number;
   companionActive?: boolean;
   companionJoined?: boolean;
+  recordingMode?: RecordingMode;
+  enableMRI?: boolean;
   onStartVisit: () => void;
   onStartRecording: () => void;
   onPause: () => void;
@@ -32,13 +37,14 @@ export function RecorderPanel({
   recordingTime,
   companionActive = false,
   companionJoined = false,
+  recordingMode = "normal",
+  enableMRI = true,
   onStartVisit,
   onStartRecording,
   onPause,
   onResume,
   onStop,
 }: RecorderPanelProps) {
-  // State A: No visit started
   if (!visitId) {
     return (
       <div className="bg-white rounded-2xl p-8 flex justify-center items-center shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)]">
@@ -69,17 +75,18 @@ export function RecorderPanel({
     );
   }
 
-  // States B / C / D: Visit started
   const micBgColor = isRecording
     ? isPaused
       ? "bg-brand-orange"
       : "bg-brand-pink"
     : "bg-brand-green";
 
+  const showNormalStart = recordingMode === "normal" && !isRecording;
+  const showConversational = recordingMode === "conversational";
+
   return (
     <div className="mt-4 sm:mt-0 bg-white rounded-2xl p-5 sm:p-6 flex justify-center items-start sm:items-center min-h-[240px] sm:min-h-[280px] shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)]">
       <div className="flex flex-col items-center w-full">
-        {/* Mic circle with pulse */}
         <div className="relative mb-5 sm:mb-8">
           <div
             className={`h-20 w-20 sm:h-28 sm:w-28 rounded-full ${micBgColor} flex items-center justify-center shadow-lg`}
@@ -96,7 +103,6 @@ export function RecorderPanel({
           </div>
         </div>
 
-        {/* Connection status or timer */}
         {!isRecording && (
           <div className="text-base text-slate-500 mb-5 sm:mb-6 text-center">
             {isConnecting
@@ -123,8 +129,15 @@ export function RecorderPanel({
           </div>
         )}
 
-        {/* Buttons */}
-        {!isRecording ? (
+        {showConversational && (
+          <ConversationalControls
+            isVisitRecording={isRecording}
+            onStartVisitNotes={onStartRecording}
+            isStartingVisitNotes={isConnecting}
+          />
+        )}
+
+        {showNormalStart && (
           <button
             onClick={onStartRecording}
             disabled={isConnecting}
@@ -132,7 +145,9 @@ export function RecorderPanel({
           >
             {isConnecting ? "Starting…" : "Start Recording"}
           </button>
-        ) : (
+        )}
+
+        {isRecording && (
           <div className="flex space-x-4">
             <button
               onClick={isPaused ? onResume : onPause}
@@ -149,7 +164,6 @@ export function RecorderPanel({
           </div>
         )}
 
-        {/* Status text */}
         {isRecording && (
           <div className="mt-4 text-sm text-slate-500">
             {isPaused
@@ -160,7 +174,7 @@ export function RecorderPanel({
           </div>
         )}
 
-
+        {enableMRI && <UploadMRIButton />}
       </div>
     </div>
   );

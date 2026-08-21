@@ -29,25 +29,32 @@ export function QRCodeDialog({ open, onClose, visitId, doctorId }: QRCodeDialogP
 interface ModeWarningDialogProps {
   open: boolean;
   onClose: () => void;
+  currentMode: "normal" | "conversational";
 }
 
-export function ModeWarningDialog({ open, onClose }: ModeWarningDialogProps) {
+export function ModeWarningDialog({ open, onClose, currentMode }: ModeWarningDialogProps) {
+  const tryingToSwitchTo = currentMode === "conversational" ? "Normal" : "Conversational";
+
   return (
-    <Dialog open={open} onOpenChange={onClose}>
+    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent
         className="max-w-md p-6"
         showClose={false}
         hiddenTitle="Cannot switch mode"
-        hiddenDescription="Explains why mode switching is disabled during an active conversational visit"
+        hiddenDescription="Explains why mode switching is disabled during an active visit"
       >
-        <h2 className="text-slate-700 text-lg font-medium">Cannot Switch to Normal Mode</h2>
+        <h2 className="text-slate-700 text-lg font-medium">
+          Cannot Switch to {tryingToSwitchTo} Mode
+        </h2>
         <div className="py-4">
           <p className="text-slate-600 text-sm">
-            You have started the conversational mode questionnaire. You can only switch back to
-            Normal Mode after ending this visit.
+            {currentMode === "conversational"
+              ? "You have started the conversational mode questionnaire. You can only switch back to Normal Mode after ending this visit."
+              : "You have started the Normal mode. You can only switch back to Conversational Mode after ending this visit."}
           </p>
           <p className="text-slate-600 text-sm mt-3">
-            To switch modes, please click the &quot;End Visit&quot; button in the header and start a new visit.
+            To switch modes, please click the &quot;End Visit&quot; button in the header and start a
+            new visit.
           </p>
         </div>
         <div className="flex justify-end">
