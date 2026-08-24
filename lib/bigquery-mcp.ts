@@ -1,5 +1,6 @@
 const BIGQUERY_MCP_SERVER_URL =
-  "https://bigquery-mcp-server-a29b29d1.connectors.hikigaiplatform.io/mcp/";
+  process.env.BIGQUERY_MCP_SERVER_URL ||
+  "https://bigquery-mcp-server-dad3cbe0.connectors.hikigaiplatform.io/mcp/";
 
 export type DiagnosisFeedbackType =
   | "soap"
