@@ -25,14 +25,13 @@ import {
   startQuestionnaire,
 } from "@/store/slices/recordingSlice";
 import {
+  createQuestionnaireTimestamp,
   PARENT_LANGUAGE,
   PATIENT_LANGUAGES,
   QUESTIONS,
   languageLabel,
-  recognizeAnswer,
-  speakQuestion,
-  stopSpeaking,
 } from "@/lib/conversation-mode";
+import { useQuestionnaireFlow } from "@/hooks/useQuestionnaireFlow";
 import { cn } from "@/lib/utils";
 
 interface ConversationalControlsProps {
@@ -54,17 +53,18 @@ export function ConversationalControls({
     conversationalModeStarted,
     currentQuestionIndex,
     currentQuestionResponse,
+    currentQuestionTranslated,
+    currentResponseTranslated,
     isRecordingAnswer,
     isAnswerPaused,
     questionnaireStatus,
   } = useAppSelector((s) => s.recording);
 
-  const recognitionStopRef = useRef<(() => void) | null>(null);
-  const recognitionPromiseRef = useRef<Promise<{
-    transcript: string;
-    usedFallback: boolean;
-  }> | null>(null);
+  const { playQuestion, cancelPlay, startRecording, stopRecordingAndTranscribe } =
+    useQuestionnaireFlow();
   const [isQuestionnaireStarting, setIsQuestionnaireStarting] = useState(false);
+  const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
+  const isBusyRef = useRef(false);
 
   if (isVisitRecording) return null;
 
@@ -73,14 +73,64 @@ export function ConversationalControls({
     if (!question) return;
 
     dispatch(setQuestionnaireStatus("Playing question..."));
-    // Without ambient TTS/translation API, spoken text stays English; label notes patient language.
-    const translatedNote =
-      language && language !== PARENT_LANGUAGE
-        ? `[Spoken for patient language: ${languageLabel(language)}]`
-        : "";
-    dispatch(setCurrentQuestionTranslated(translatedNote));
-    await speakQuestion(question.text_en, language);
-    dispatch(setQuestionnaireStatus("Ready to record your answer"));
+    try {
+      const { translatedText } = await playQuestion(index, language);
+      dispatch(
+        setCurrentQuestionTranslated(
+          translatedText ||
+            (language !== PARENT_LANGUAGE
+              ? `[Audio in ${languageLabel(language)}]`
+              : question.text_en)
+        )
+      );
+      dispatch(setQuestionnaireStatus("Ready to record your answer"));
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        dispatch(setQuestionnaireStatus(""));
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : "Failed to play question";
+      dispatch(setQuestionnaireStatus(""));
+      toast.error(message);
+    }
+  };
+
+  const saveCurrentToHistory = () => {
+    const question = QUESTIONS[currentQuestionIndex];
+    if (!question || !selectedLanguage || !currentQuestionResponse) return;
+
+    const isSkipped = currentQuestionResponse === "Skipped";
+    dispatch(
+      addQAHistory({
+        question_id: question.id,
+        questionEn: question.text_en,
+        questionTranslated: currentQuestionTranslated,
+        responseEn: currentQuestionResponse,
+        responseTranslated: isSkipped
+          ? null
+          : {
+              english_translation:
+                currentResponseTranslated?.english_translation || currentQuestionResponse,
+              original_text:
+                currentResponseTranslated?.original_text || currentQuestionResponse,
+            },
+        language: selectedLanguage,
+        timestamp: createQuestionnaireTimestamp(),
+        questionNumber: currentQuestionIndex + 1,
+      })
+    );
+  };
+
+  const advanceOrComplete = async (nextIndex: number, language: string) => {
+    if (nextIndex >= QUESTIONS.length) {
+      dispatch(completeQuestionnaire());
+      toast.success("Questionnaire completed! You can now record the visit notes.");
+      return;
+    }
+
+    dispatch(nextQuestion());
+    await playCurrentQuestion(nextIndex, language);
   };
 
   const handleStartQuestionnaire = async () => {
@@ -88,57 +138,37 @@ export function ConversationalControls({
       toast.error("Please select a language first");
       return;
     }
-    if (isQuestionnaireStarting) return;
+    if (isQuestionnaireStarting || isBusyRef.current) return;
+
+    isBusyRef.current = true;
     setIsQuestionnaireStarting(true);
     try {
       dispatch(startQuestionnaire());
       await playCurrentQuestion(0, selectedLanguage);
     } finally {
       setIsQuestionnaireStarting(false);
+      isBusyRef.current = false;
     }
   };
 
-  const saveCurrentAndAdvance = () => {
-    const question = QUESTIONS[currentQuestionIndex];
-    if (!question) return;
+  const handleNextQuestion = async () => {
+    if (!currentQuestionResponse || !selectedLanguage || isBusyRef.current) return;
 
-    dispatch(
-      addQAHistory({
-        questionEn: question.text_en,
-        questionTranslated:
-          selectedLanguage !== PARENT_LANGUAGE
-            ? `[Patient language: ${languageLabel(selectedLanguage)}]`
-            : "",
-        responseEn: currentQuestionResponse,
-        responseTranslated: currentQuestionResponse
-          ? {
-              english_translation: currentQuestionResponse,
-              original_text: currentQuestionResponse,
-            }
-          : null,
-      })
-    );
+    saveCurrentToHistory();
 
     const nextIndex = currentQuestionIndex + 1;
-    if (nextIndex >= QUESTIONS.length) {
-      dispatch(completeQuestionnaire());
-      toast.success("Questionnaire completed! You can now record the visit notes.");
-      return;
+    isBusyRef.current = true;
+    try {
+      await advanceOrComplete(nextIndex, selectedLanguage);
+    } finally {
+      isBusyRef.current = false;
     }
-
-    dispatch(nextQuestion());
-    void playCurrentQuestion(nextIndex, selectedLanguage);
   };
 
-  const handleNextQuestion = () => {
-    if (!currentQuestionResponse) return;
-    saveCurrentAndAdvance();
-  };
+  const handleSkip = async () => {
+    if (!selectedLanguage || isBusyRef.current) return;
 
-  const handleSkip = () => {
-    stopSpeaking();
-    recognitionStopRef.current?.();
-    recognitionStopRef.current = null;
+    cancelPlay();
     dispatch(setRecordingAnswer(false));
     dispatch(setAnswerPaused(false));
 
@@ -146,76 +176,103 @@ export function ConversationalControls({
     if (question) {
       dispatch(
         addQAHistory({
+          question_id: question.id,
           questionEn: question.text_en,
-          questionTranslated:
-            selectedLanguage !== PARENT_LANGUAGE
-              ? `[Patient language: ${languageLabel(selectedLanguage)}]`
-              : "",
-          responseEn: "",
+          questionTranslated: currentQuestionTranslated,
+          responseEn: "Skipped",
           responseTranslated: null,
+          language: selectedLanguage,
+          timestamp: createQuestionnaireTimestamp(),
+          questionNumber: currentQuestionIndex + 1,
         })
       );
     }
 
     const nextIndex = currentQuestionIndex + 1;
-    if (nextIndex >= QUESTIONS.length) {
-      dispatch(completeQuestionnaire());
-      toast.success("Questionnaire completed! You can now record the visit notes.");
-      return;
+    isBusyRef.current = true;
+    try {
+      if (nextIndex >= QUESTIONS.length) {
+        dispatch(completeQuestionnaire());
+        toast.success("Questionnaire completed! You can now record the visit notes.");
+        return;
+      }
+      dispatch(nextQuestion());
+      await playCurrentQuestion(nextIndex, selectedLanguage);
+    } finally {
+      isBusyRef.current = false;
     }
-
-    dispatch(nextQuestion());
-    void playCurrentQuestion(nextIndex, selectedLanguage);
   };
 
   const handleReplay = () => {
-    if (isRecordingAnswer) return;
+    if (isRecordingAnswer || !selectedLanguage) return;
     void playCurrentQuestion(currentQuestionIndex, selectedLanguage);
   };
 
   const handleRecordAnswer = async () => {
     if (isRecordingAnswer) {
+      if (isProcessingAnswer) return;
+      setIsProcessingAnswer(true);
       dispatch(setQuestionnaireStatus("Processing your response..."));
-      recognitionStopRef.current?.();
-      const outcome = await recognitionPromiseRef.current;
-      recognitionStopRef.current = null;
-      recognitionPromiseRef.current = null;
       dispatch(setRecordingAnswer(false));
       dispatch(setAnswerPaused(false));
 
-      const transcript = outcome?.transcript?.trim() || "(No speech detected)";
-      dispatch(setCurrentQuestionResponse(transcript));
-      dispatch(
-        setCurrentResponseTranslated({
-          english_translation: transcript,
-          original_text: transcript,
-        })
-      );
-      dispatch(setQuestionnaireStatus(""));
-      if (outcome?.usedFallback) {
-        toast.message("Using browser speech recognition fallback");
+      try {
+        const structured = await stopRecordingAndTranscribe();
+        const english = structured?.english?.trim() || "";
+        const original = structured?.original?.trim() || english;
+
+        if (!english) {
+          dispatch(setCurrentQuestionResponse("(No speech detected)"));
+          dispatch(
+            setCurrentResponseTranslated({
+              english_translation: "(No speech detected)",
+              original_text: original || "(No speech detected)",
+            })
+          );
+        } else {
+          dispatch(setCurrentQuestionResponse(english));
+          dispatch(
+            setCurrentResponseTranslated({
+              english_translation: english,
+              original_text: original || english,
+            })
+          );
+        }
+        dispatch(setQuestionnaireStatus(""));
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to process answer";
+        toast.error(message);
+        dispatch(setQuestionnaireStatus(""));
+      } finally {
+        setIsProcessingAnswer(false);
       }
       return;
     }
 
     if (currentQuestionResponse) return;
 
-    stopSpeaking();
-    dispatch(setRecordingAnswer(true));
-    dispatch(setAnswerPaused(false));
-    dispatch(setQuestionnaireStatus("Recording your answer..."));
-
-    const session = recognizeAnswer(selectedLanguage || PARENT_LANGUAGE);
-    recognitionStopRef.current = session.stop;
-    recognitionPromiseRef.current = session.result;
+    try {
+      dispatch(setRecordingAnswer(true));
+      dispatch(setAnswerPaused(false));
+      dispatch(setQuestionnaireStatus("Recording your answer..."));
+      await startRecording();
+    } catch (error) {
+      dispatch(setRecordingAnswer(false));
+      dispatch(setQuestionnaireStatus(""));
+      toast.error(
+        error instanceof Error ? error.message : "Could not access microphone"
+      );
+    }
   };
 
   const handlePauseResumeAnswer = () => {
     if (!isRecordingAnswer) return;
-    // Web Speech API has limited pause support; toggle UI state only.
     dispatch(setAnswerPaused(!isAnswerPaused));
     dispatch(
-      setQuestionnaireStatus(isAnswerPaused ? "Recording your answer..." : "Answer recording paused")
+      setQuestionnaireStatus(
+        isAnswerPaused ? "Recording your answer..." : "Answer recording paused"
+      )
     );
   };
 
@@ -260,7 +317,8 @@ export function ConversationalControls({
           !isAnswerPaused && (
             <button
               className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg text-sm"
-              onClick={handleSkip}
+              onClick={() => void handleSkip()}
+              disabled={isProcessingAnswer || isQuestionnaireStarting}
             >
               Skip
             </button>
@@ -284,6 +342,7 @@ export function ConversationalControls({
               isRecordingAnswer ||
               isAnswerPaused ||
               isQuestionnaireStarting ||
+              isProcessingAnswer ||
               questionnaireCompleted ||
               (questionnaireStarted && !currentQuestionResponse)
             }
@@ -299,7 +358,7 @@ export function ConversationalControls({
           <button
             onClick={handleReplay}
             className="px-2 hover:bg-purple-500 text-blue-500 hover:text-white bg-transparent rounded-lg h-8 text-xs font-medium flex items-center gap-1"
-            disabled={isRecordingAnswer}
+            disabled={isRecordingAnswer || isProcessingAnswer}
           >
             <Repeat1 className="h-4 w-4" /> Question
           </button>
@@ -328,9 +387,15 @@ export function ConversationalControls({
                     ? "bg-slate-200 text-slate-400"
                     : "bg-brand-green hover:bg-opacity-90 text-white"
               )}
-              disabled={!!currentQuestionResponse && !isRecordingAnswer}
+              disabled={
+                (!!currentQuestionResponse && !isRecordingAnswer) || isProcessingAnswer
+              }
             >
-              {isRecordingAnswer ? "Stop Recording" : "Record Answer"}
+              {isRecordingAnswer
+                ? isProcessingAnswer
+                  ? "Processing..."
+                  : "Stop Recording"
+                : "Record Answer"}
             </button>
           ) : questionnaireCompleted ? (
             <button

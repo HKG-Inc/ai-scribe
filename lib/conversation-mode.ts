@@ -1,7 +1,6 @@
 /**
- * Conversational questionnaire constants and local (frontend-only) helpers.
- * In ai-scribe-web these talk to ambient socket events; here voice uses the browser
- * Speech Synthesis / Speech Recognition APIs — no backend questionnaire APIs.
+ * Conversational questionnaire constants.
+ * Play/record use GCS canned assets or Hikigai questionnaire agents (see hooks/useQuestionnaireFlow).
  */
 
 export const PARENT_LANGUAGE = "en-US";
@@ -13,6 +12,7 @@ export interface Question {
 }
 
 export interface QuestionnaireHistoryItem {
+  question_id: string;
   questionEn: string;
   questionTranslated: string;
   responseEn: string;
@@ -20,17 +20,35 @@ export interface QuestionnaireHistoryItem {
     english_translation: string;
     original_text: string;
   } | null;
+  language: string;
+  timestamp: string;
   questionNumber: number;
 }
 
 export const PATIENT_LANGUAGES = [
   { value: "ar-XA", label: "Arabic / العربية" },
+  { value: "bn-IN", label: "Bengali / বাংলা" },
+  { value: "de-DE", label: "German / Deutsch" },
   { value: "en-US", label: "English" },
-  { value: "hi-IN", label: "Hindi / हिन्दी" },
-  { value: "ml-IN", label: "Malayalam / മലയാളം" },
   { value: "es-ES", label: "Spanish / Español" },
+  { value: "fr-FR", label: "French / Français" },
+  { value: "gu-IN", label: "Gujarati / ગુજરાતી" },
+  { value: "hi-IN", label: "Hindi / हिन्दी" },
+  { value: "it-IT", label: "Italian / Italiano" },
+  { value: "ja-JP", label: "Japanese / 日本語" },
+  { value: "kn-IN", label: "Kannada / ಕನ್ನಡ" },
+  { value: "ko-KP", label: "Korean / 한국어" },
+  { value: "ml-IN", label: "Malayalam / മലയാളം" },
+  { value: "mr-IN", label: "Marathi / मराठी" },
+  { value: "pl-PL", label: "Polish / Polski" },
+  { value: "pt-BR", label: "Portuguese / Português" },
+  { value: "ru-RU", label: "Russian / Русский" },
   { value: "ta-IN", label: "Tamil / தமிழ்" },
+  { value: "te-IN", label: "Telugu / తెలుగు" },
+  { value: "th-TH", label: "Thai / ไทย" },
   { value: "uk-UA", label: "Ukrainian / Українська" },
+  { value: "vi-VN", label: "Vietnamese / Tiếng Việt" },
+  { value: "zh-CN", label: "Chinese / 中文" },
 ] as const;
 
 export const QUESTIONS: Question[] = [
@@ -142,160 +160,12 @@ export const QUESTIONS: Question[] = [
     text_en: "And finally, have you had any previous injury like this in the past?",
     category: "medical_history",
   },
-  {
-    id: "q25",
-    text_en:
-      "Were you ever treated at a hospital for this accident, were you ever treated at a previous facility like a hospital or an urgent care or a primary care physician's facility?",
-    category: "medical_history",
-  },
 ];
 
 export function languageLabel(code: string): string {
   return PATIENT_LANGUAGES.find((l) => l.value === code)?.label ?? code;
 }
 
-/** Speak question text locally (replaces ambient TTS / prerecorded audio). */
-export function speakQuestion(text: string, language: string): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window === "undefined" || !window.speechSynthesis) {
-      resolve();
-      return;
-    }
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = language || PARENT_LANGUAGE;
-    utterance.rate = 0.95;
-
-    const voices = window.speechSynthesis.getVoices();
-    const match =
-      voices.find((v) => v.lang === language) ||
-      voices.find((v) => v.lang.startsWith(language.split("-")[0] || ""));
-    if (match) {
-      utterance.voice = match;
-    }
-
-    utterance.onend = () => resolve();
-    utterance.onerror = () => resolve();
-    window.speechSynthesis.speak(utterance);
-  });
-}
-
-export function stopSpeaking() {
-  if (typeof window !== "undefined" && window.speechSynthesis) {
-    window.speechSynthesis.cancel();
-  }
-}
-
-/* Browser SpeechRecognition is not always in lib.dom — keep a minimal shape. */
-interface BrowserSpeechRecognition extends EventTarget {
-  lang: string;
-  interimResults: boolean;
-  continuous: boolean;
-  maxAlternatives: number;
-  start: () => void;
-  stop: () => void;
-  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
-  onerror: (() => void) | null;
-  onend: (() => void) | null;
-}
-
-interface BrowserSpeechRecognitionEvent {
-  resultIndex: number;
-  results: ArrayLike<{ isFinal: boolean; 0?: { transcript: string } }>;
-}
-
-type SpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
-
-function getSpeechRecognition(): SpeechRecognitionConstructor | null {
-  if (typeof window === "undefined") return null;
-  const w = window as Window & {
-    SpeechRecognition?: SpeechRecognitionConstructor;
-    webkitSpeechRecognition?: SpeechRecognitionConstructor;
-  };
-  return w.SpeechRecognition || w.webkitSpeechRecognition || null;
-}
-
-/**
- * Record a short spoken answer via Web Speech API (replaces ambient STT).
- * Falls back to a placeholder if the browser has no speech recognition.
- */
-export function recognizeAnswer(language: string): {
-  stop: () => void;
-  result: Promise<{ transcript: string; usedFallback: boolean }>;
-} {
-  const Recognition = getSpeechRecognition();
-  let recognition: BrowserSpeechRecognition | null = null;
-  let settled = false;
-  let resolveFn: ((value: { transcript: string; usedFallback: boolean }) => void) | null = null;
-
-  const result = new Promise<{ transcript: string; usedFallback: boolean }>((resolve) => {
-    resolveFn = resolve;
-  });
-
-  const finish = (transcript: string, usedFallback: boolean) => {
-    if (settled) return;
-    settled = true;
-    resolveFn?.({ transcript, usedFallback });
-  };
-
-  if (!Recognition) {
-    return {
-      stop: () =>
-        finish(
-          "(Speech recognition unavailable in this browser — answer recorded locally.)",
-          true
-        ),
-      result,
-    };
-  }
-
-  recognition = new Recognition();
-  recognition.lang = language || PARENT_LANGUAGE;
-  recognition.interimResults = true;
-  recognition.continuous = true;
-  recognition.maxAlternatives = 1;
-
-  let finalTranscript = "";
-  let interimTranscript = "";
-
-  recognition.onresult = (event: BrowserSpeechRecognitionEvent) => {
-    interimTranscript = "";
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const piece = event.results[i]?.[0]?.transcript ?? "";
-      if (event.results[i]?.isFinal) {
-        finalTranscript += `${piece} `;
-      } else {
-        interimTranscript += piece;
-      }
-    }
-  };
-
-  recognition.onerror = () => {
-    const text = (finalTranscript || interimTranscript).trim();
-    finish(text || "(No speech detected)", !text);
-  };
-
-  recognition.onend = () => {
-    const text = (finalTranscript || interimTranscript).trim();
-    finish(text || "(No speech detected)", !text);
-  };
-
-  try {
-    recognition.start();
-  } catch {
-    finish("(Could not start speech recognition)", true);
-  }
-
-  return {
-    stop: () => {
-      try {
-        recognition?.stop();
-      } catch {
-        const text = (finalTranscript || interimTranscript).trim();
-        finish(text || "(No speech detected)", !text);
-      }
-    },
-    result,
-  };
+export function createQuestionnaireTimestamp(): string {
+  return new Date().toISOString();
 }

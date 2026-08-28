@@ -69,6 +69,7 @@ function isAnySectionLoading(sections: ReportSectionLoading): boolean {
 }
 
 export interface QAHistoryItem {
+  question_id: string;
   questionEn: string;
   questionTranslated: string;
   responseEn?: string;
@@ -76,6 +77,9 @@ export interface QAHistoryItem {
     english_translation: string;
     original_text: string;
   } | null;
+  language: string;
+  timestamp: string;
+  questionNumber?: number;
 }
 
 export interface MriFinding {

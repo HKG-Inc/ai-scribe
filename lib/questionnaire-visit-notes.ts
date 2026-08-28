@@ -231,7 +231,7 @@ export function qaHistoryToQuestionnaireResponses(
   qaHistory: Array<{
     questionEn: string;
     responseEn?: string;
-    responseTranslated: { english_translation: string } | null;
+    responseTranslated: { english_translation: string; original_text?: string } | null;
   }>
 ): QuestionnaireQAItem[] {
   return qaHistory.map((qa) => ({
@@ -239,6 +239,7 @@ export function qaHistoryToQuestionnaireResponses(
     answer_text:
       qa.responseTranslated?.english_translation ||
       qa.responseEn ||
+      qa.responseTranslated?.original_text ||
       "Skipped",
   }));
 }
