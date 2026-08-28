@@ -44,6 +44,10 @@ import { normalizeReferrals } from "@/lib/referrals";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
 import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
 import { useCompanionTranscript } from "@/hooks/useCompanionTranscript";
+import {
+  mapVisitNotesApiResponseToDisplay,
+  qaHistoryToQuestionnaireResponses,
+} from "@/lib/questionnaire-visit-notes";
 
 interface AlertItem {
   type: AlertType;
@@ -404,7 +408,10 @@ export default function RecordingPage() {
       dispatch(setReportSectionLoading({ section, loading: false }));
     };
 
-    const callAgentRoute = async <T,>(url: string, extraBody?: Record<string, string>) => {
+    const callAgentRoute = async <T,>(
+      url: string,
+      extraBody?: Record<string, unknown>
+    ) => {
       try {
         const response = await apiFetch(url, {
           method: "POST",
@@ -510,18 +517,22 @@ export default function RecordingPage() {
     };
 
     const runVisitNotes = async () => {
-      const result = await callAgentRoute<{ visit_notes?: string[] }>("/api/visit-notes");
+      const questionnaireResponses = qaHistoryToQuestionnaireResponses(
+        store.getState().recording.qaHistory
+      );
+      const result = await callAgentRoute<{
+        visit_notes?: unknown;
+        visit_notes_text?: string[];
+      }>("/api/visit-notes", {
+        questionnaire_responses: questionnaireResponses,
+      });
       if (!result.ok) {
         console.warn("[generateReport] Visit notes failed:", result.error);
         finishSection("visitNotes");
         return;
       }
-      const mappedVisitNotes = (result.data?.visit_notes || []).filter(
-        (item) => item.trim().length > 0
-      );
       finishSection("visitNotes", {
-        visitNotes:
-          mappedVisitNotes.length > 0 ? [mappedVisitNotes.join("\n\n")] : [],
+        visitNotes: mapVisitNotesApiResponseToDisplay(result.data ?? {}),
       });
     };
 

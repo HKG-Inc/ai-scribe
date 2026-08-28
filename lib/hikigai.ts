@@ -1,6 +1,11 @@
 export const HIKIGAI_AGENT_TIMEOUT_MS = 300000;
 export const HIKIGAI_BACKEND_URL_DEFAULT = "https://backend.hikigaiplatform.io";
 
+export interface AgentAttachment {
+	data_base64: string;
+	mime_type: string;
+}
+
 export class HikigaiClient {
 	private apiKey: string;
 	private projectId: string;
@@ -13,6 +18,7 @@ export class HikigaiClient {
 		this.projectId = projectId || process.env.HIKIGAI_PROJECT_ID || "";
 		this.backendUrl =
 			backendUrl ||
+			process.env.HIKIGAI_BASE_URL ||
 			process.env.HIKIGAI_BACKEND_URL ||
 			HIKIGAI_BACKEND_URL_DEFAULT;
 		this.authToken = null;
@@ -32,11 +38,19 @@ export class HikigaiClient {
 		return Math.min(300, Math.max(5, Math.ceil(resolvedTimeoutMs / 1000)));
 	}
 
-	private buildInvokeBody(input: unknown, timeoutMs?: number): string {
-		return JSON.stringify({
+	private buildInvokeBody(
+		input: unknown,
+		timeoutMs?: number,
+		attachments?: AgentAttachment[]
+	): string {
+		const body: Record<string, unknown> = {
 			input,
 			timeout: this.getTimeoutSeconds(timeoutMs),
-		});
+		};
+		if (attachments?.length) {
+			body.attachments = attachments;
+		}
+		return JSON.stringify(body);
 	}
 
 	private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs?: number): Promise<Response> {
@@ -121,7 +135,21 @@ export class HikigaiClient {
 		};
 	}
 
-	async invokeAgent(agentSlug: string, input: unknown, timeoutMs?: number) {
+	async invokeAgent(
+		agentSlug: string,
+		input: unknown,
+		timeoutMs?: number,
+		attachments?: AgentAttachment[]
+	) {
+		return this.invokeAgentRaw(agentSlug, input, timeoutMs, attachments);
+	}
+
+	private async invokeAgentRaw(
+		agentSlug: string,
+		input: unknown,
+		timeoutMs?: number,
+		attachments?: AgentAttachment[]
+	) {
 		if (!this.projectId) {
 			throw new Error("Missing HIKIGAI_PROJECT_ID");
 		}
@@ -129,36 +157,27 @@ export class HikigaiClient {
 		const url = `${this.backendUrl}/api/v1/agents/${agentSlug}/invoke`;
 		let token = await this.getAuthToken(false, timeoutMs);
 
-		let response = await this.fetchWithTimeout(
-			url,
-			{
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${token}`,
-				"X-Project-ID": this.projectId,
-			},
-			body: this.buildInvokeBody(input, timeoutMs),
-			},
-			timeoutMs
-		);
+		const post = (authToken: string) =>
+			this.fetchWithTimeout(
+				url,
+				{
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+						Authorization: `Bearer ${authToken}`,
+						"X-Project-ID": this.projectId,
+					},
+					body: this.buildInvokeBody(input, timeoutMs, attachments),
+				},
+				timeoutMs
+			);
+
+		let response = await post(token);
 
 		// If the token expired, refresh once and retry.
 		if (response.status === 401) {
 			token = await this.getAuthToken(true, timeoutMs);
-			response = await this.fetchWithTimeout(
-				url,
-				{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${token}`,
-					"X-Project-ID": this.projectId,
-				},
-				body: this.buildInvokeBody(input, timeoutMs),
-				},
-				timeoutMs
-			);
+			response = await post(token);
 		}
 
 		if (!response.ok) {

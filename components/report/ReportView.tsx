@@ -28,6 +28,10 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { apiFetch, cleanDateValue, mapFollowUpAppointment, withoutBasePath } from "@/lib/utils";
 import { formatMedicationFrequency, normalizeMedicationFrequency } from "@/lib/medication";
 import { getProcedureTypeBadge, getProcedureTypeBadgeClass } from "@/lib/procedure-types";
+import {
+  mapVisitNotesApiResponseToDisplay,
+  qaHistoryToQuestionnaireResponses,
+} from "@/lib/questionnaire-visit-notes";
 import { formatReferralUrgency } from "@/lib/referrals";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
@@ -263,6 +267,7 @@ function MedicalNotesTab({
   const sectionLoading = useAppSelector((s) => s.recording.reportSectionLoading);
   const visitId = useAppSelector((s) => s.recording.visitId);
   const sessionId = useAppSelector((s) => s.recording.sessionId);
+  const qaHistory = useAppSelector((s) => s.recording.qaHistory);
   const user = useAppSelector((s) => s.user);
 
   const [expandedSoap, setExpandedSoap] = useState<Record<string, boolean>>({});
@@ -282,20 +287,26 @@ function MedicalNotesTab({
       const response = await apiFetch("/api/visit-notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: transcriptMessage }),
+        body: JSON.stringify({
+          message: transcriptMessage,
+          questionnaire_responses: qaHistoryToQuestionnaireResponses(qaHistory),
+        }),
       });
 
-      const data = (await response.json()) as { visit_notes?: string[]; error?: string };
+      const data = (await response.json()) as {
+        visit_notes?: unknown;
+        visit_notes_text?: string[];
+        error?: string;
+      };
       const apiError = getApiError(response, data, "Visit notes retry failed");
       if (apiError) {
         throw new Error(apiError);
       }
 
-      const mappedVisitNotes = (data.visit_notes || []).filter((item) => item.trim().length > 0);
       dispatch(
         setReportData({
           ...reportData,
-          visitNotes: mappedVisitNotes.length > 0 ? [mappedVisitNotes.join("\n\n")] : [],
+          visitNotes: mapVisitNotesApiResponseToDisplay(data),
         })
       );
     } catch (error) {

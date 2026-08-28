@@ -44,6 +44,7 @@ const nextConfig: NextConfig = {
       ]),
     ];
   },
+  serverExternalPackages: ["mupdf"],
   images: {
     remotePatterns: [
       {
