@@ -7,7 +7,7 @@ import { FileText, Eye, Paperclip, Loader2, X, Download } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { appendMriReport, type MriReport } from "@/store/slices/recordingSlice";
 import MRISummaryModal from "@/components/recording/MRISummaryModal";
-import { apiFetch } from "@/lib/utils";
+import { apiFetch, displayMriFinding } from "@/lib/utils";
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const MAX_FILES = 6;
@@ -23,33 +23,18 @@ export default function UploadMRIButton() {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
 
-  const fileToBase64 = (file: File): Promise<string> =>
-    new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const base64String = (reader.result as string).split(",")[1];
-        resolve(base64String);
-      };
-      reader.onerror = (error) => reject(error);
-    });
-
   const generateMRIClinicalSummary = async (files: File[]) => {
     setIsGeneratingReport(true);
     try {
-      const mriFilesBase64 = await Promise.all(
-        files.map(async (file) => ({
-          filename: file.name,
-          content_base64: await fileToBase64(file),
-        }))
-      );
+      const formData = new FormData();
+      for (const file of files) {
+        formData.append("mri_files", file, file.name);
+      }
 
+      // Do not set Content-Type — the browser sets multipart/form-data with boundary.
       const response = await apiFetch("/api/gen/v2/mri_report/clinical_summary", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ mri_files: mriFilesBase64 }),
+        body: formData,
       });
 
       const result = (await response.json()) as {
@@ -188,8 +173,9 @@ export default function UploadMRIButton() {
         doc.setFont("helvetica", "normal");
         if (study.human_label) addParagraph(study.human_label, 5);
         study.findings?.forEach((finding) => {
-          addParagraph(`• ${finding.pathology || "Unknown"}`, 5);
-          if (finding.details) addParagraph(finding.details, 10);
+          const { label, details } = displayMriFinding(finding);
+          addParagraph(`• ${label}`, 5);
+          if (details) addParagraph(details, 10);
         });
         y += 4;
       });

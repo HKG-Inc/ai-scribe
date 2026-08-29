@@ -25,7 +25,7 @@ import {
 import { toast } from "sonner";
 
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { apiFetch, cleanDateValue, mapFollowUpAppointment, withoutBasePath } from "@/lib/utils";
+import { apiFetch, cleanDateValue, displayMriFinding, mapFollowUpAppointment, withoutBasePath } from "@/lib/utils";
 import { formatMedicationFrequency, normalizeMedicationFrequency } from "@/lib/medication";
 import { getProcedureTypeBadge, getProcedureTypeBadgeClass } from "@/lib/procedure-types";
 import {
@@ -1645,16 +1645,19 @@ function MRIReportTab() {
             <p className="text-xs text-slate-500 mb-3">{study.human_label}</p>
           )}
           {study.findings?.length ? (
-            study.findings.map((finding, findingIndex) => (
+            study.findings.map((finding, findingIndex) => {
+              const { label, details } = displayMriFinding(finding);
+              return (
               <div key={findingIndex} className="flex items-start gap-3 mb-2">
                 <div className="font-medium text-sm text-slate-800">
-                  {finding.pathology || "Unknown pathology"}
+                  {label}
                 </div>
-                {finding.details && (
-                  <div className="text-sm text-slate-600">- {finding.details}</div>
+                {details && (
+                  <div className="text-sm text-slate-600">- {details}</div>
                 )}
               </div>
-            ))
+              );
+            })
           ) : (
             <p className="text-sm text-slate-500 italic">No findings recorded</p>
           )}

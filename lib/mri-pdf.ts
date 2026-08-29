@@ -6,7 +6,6 @@ export const VISION_JPEG_QUALITY = 95;
 
 const SCANNED_PAGE_TEXT_THRESHOLD = 50;
 const SCANNED_SAMPLE_PAGES = 3;
-const SCANNED_MAJORITY = 2;
 const SHORT_PAGE_TEXT_THRESHOLD = 100;
 
 function pagePlainText(page: Page): string {
@@ -40,8 +39,13 @@ function extractSpansFromJson(jsonStr: string): string {
   }
 }
 
+/**
+ * Default: toStructuredText().asText() (PyMuPDF page.get_text()).
+ * If ≤ 100 chars, retry preserve-spans JSON and use it when longer
+ * (PyMuPDF get_text("dict") span concat equivalent).
+ */
 function pageTextWithFallback(page: Page): string {
-  let text = pagePlainText(page).trim();
+  const text = pagePlainText(page).trim();
   if (text.length > SHORT_PAGE_TEXT_THRESHOLD) {
     return text;
   }
@@ -73,11 +77,19 @@ function openPdfDocument(bytes: Buffer): Document {
   return Document.openDocument(bytes, "application/pdf");
 }
 
+/**
+ * Sample first min(3, pageCount) pages.
+ * Page is scanned if plain text length < 50.
+ * If ≥ 2 sample pages are scanned → scanned document.
+ * For a 1-page PDF, that single page being scanned also counts
+ * (otherwise OCR would never run on single-page scans).
+ */
 export function isScannedPdf(doc: Document): boolean {
   const pageCount = doc.countPages();
   const sample = Math.min(SCANNED_SAMPLE_PAGES, pageCount);
-  let scanned = 0;
+  if (sample === 0) return false;
 
+  let scanned = 0;
   for (let i = 0; i < sample; i++) {
     const page = doc.loadPage(i);
     try {
@@ -90,9 +102,14 @@ export function isScannedPdf(doc: Document): boolean {
     }
   }
 
-  return scanned >= SCANNED_MAJORITY;
+  const needed = Math.min(2, sample);
+  return scanned >= needed;
 }
 
+/**
+ * MuPDF text extract. Returns "" when the PDF is treated as scanned
+ * so the caller must OCR all pages (do not keep partial digital text).
+ */
 export function extractPdfText(bytes: Buffer): string {
   const doc = openPdfDocument(bytes);
   try {
@@ -133,8 +150,8 @@ export function renderPageJpeg(page: Page): Buffer {
   const pixmap = page.toPixmap(
     mupdf.Matrix.scale(zoom, zoom),
     mupdf.ColorSpace.DeviceRGB,
-    false,
-    true
+    false, // no alpha — required for JPEG
+    true // include annotations
   );
 
   try {
@@ -144,6 +161,7 @@ export function renderPageJpeg(page: Page): Buffer {
   }
 }
 
+/** Render every page to JPEG (only used for scanned PDFs → OCR agent). */
 export function renderAllPagesJpeg(bytes: Buffer): Buffer[] {
   const doc = openPdfDocument(bytes);
   const jpegs: Buffer[] = [];

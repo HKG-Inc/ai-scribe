@@ -87,13 +87,15 @@ export interface MriFinding {
   details?: string;
 }
 
+export type MriFindingItem = MriFinding | string;
+
 export interface MriStudy {
   region?: string;
   date?: string;
   contrast?: string;
   human_label?: string;
   filename?: string;
-  findings?: MriFinding[];
+  findings?: MriFindingItem[];
 }
 
 export interface MriReport {

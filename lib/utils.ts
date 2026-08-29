@@ -164,3 +164,17 @@ export function mapFollowUpAppointment(firstFollowUp: unknown): FollowUpAppointm
     ...(visit_type ? { visit_type } : {}),
   };
 }
+
+/** Display MRI findings as returned by the agent (string or { pathology, details }). */
+export function displayMriFinding(finding: string | { pathology?: string; details?: string }): {
+  label: string;
+  details?: string;
+} {
+  if (typeof finding === "string") {
+    return { label: finding };
+  }
+  return {
+    label: finding.pathology || "Unknown pathology",
+    details: finding.details,
+  };
+}

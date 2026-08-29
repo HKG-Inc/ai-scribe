@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Activity, DownloadIcon, Loader2Icon, X } from "lucide-react";
 import { useAppSelector } from "@/store/hooks";
+import { displayMriFinding } from "@/lib/utils";
 
 interface MRISummaryModalProps {
   open: boolean;
@@ -107,12 +108,13 @@ export default function MRISummaryModal({ open, onClose }: MRISummaryModalProps)
 
           study.findings.forEach((finding) => {
             checkY(15);
+            const { label, details } = displayMriFinding(finding);
             doc.setFont("helvetica", "bold");
-            doc.text(`• ${finding.pathology || "Unknown pathology"}`, margin + 10, y);
+            doc.text(`• ${label}`, margin + 10, y);
             y += 5;
             doc.setFont("helvetica", "normal");
-            if (finding.details) {
-              const sanitizedDetails = sanitizeText(finding.details) || finding.details;
+            if (details) {
+              const sanitizedDetails = sanitizeText(details) || details;
               const detailLines = doc.splitTextToSize(
                 sanitizedDetails,
                 pageWidth - margin * 2 - 15
@@ -202,18 +204,21 @@ export default function MRISummaryModal({ open, onClose }: MRISummaryModalProps)
                   </div>
                   {study.findings?.length ? (
                     <div>
-                      {study.findings.map((finding, findingIndex) => (
+                      {study.findings.map((finding, findingIndex) => {
+                        const { label, details } = displayMriFinding(finding);
+                        return (
                         <div key={findingIndex} className="flex items-start gap-3 mb-2">
                           <div className="font-medium text-sm text-slate-800">
-                            {finding.pathology || "Unknown pathology"}
+                            {label}
                           </div>
-                          {finding.details && (
+                          {details && (
                             <div className="text-sm text-slate-600 leading-relaxed">
-                              - {finding.details}
+                              - {details}
                             </div>
                           )}
                         </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   ) : (
                     <p className="text-sm text-slate-500 italic">No findings recorded</p>

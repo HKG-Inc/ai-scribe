@@ -1,4 +1,3 @@
-import { extractAgentOutput } from "@/lib/questionnaire-visit-notes";
 import { hikigai, type AgentAttachment } from "@/lib/hikigai";
 import {
   decodeTextFile,
@@ -11,6 +10,9 @@ export const MRI_AGENT_TIMEOUT_MS = 180_000;
 export const MRI_OCR_BATCH_SIZE = 5;
 export const MRI_OCR_PARALLEL_BATCHES = 2;
 export const MRI_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+
+export const MRI_OCR_AGENT = "mri-report-ocr-agent";
+export const MRI_SUMMARY_AGENT = "mri-clinical-summary-agent";
 
 export interface MriInputFile {
   filename: string;
@@ -31,7 +33,8 @@ export interface MriStudy {
   doctor_name: string;
   findings_text: string;
   impressions_text: string;
-  findings: MriFinding[];
+  /** Kept exactly as returned by the summary agent (objects and/or strings). */
+  findings: Array<MriFinding | string>;
 }
 
 export interface MriClinicalSummaryData {
@@ -43,6 +46,46 @@ interface OcrBatch {
   startPage: number;
   endPage: number;
   jpegs: Buffer[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Prefer response.output (structured schema). Fall back to parsing
+ * response.content when output is missing or a JSON string.
+ */
+function parseAgentPayload(payload: unknown): Record<string, unknown> {
+  const root = asRecord(payload);
+  if (!root) return {};
+
+  const tryParse = (value: unknown): Record<string, unknown> | null => {
+    if (!value) return null;
+    if (typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        return asRecord(parsed);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
+  return (
+    tryParse(root.output) ||
+    tryParse(root.content) ||
+    tryParse(root.result) ||
+    tryParse(root.data) ||
+    root
+  );
 }
 
 function chunkOcrBatches(jpegs: Buffer[]): OcrBatch[] {
@@ -88,13 +131,14 @@ async function invokeOcrBatch(
   filename: string,
   batch: OcrBatch
 ): Promise<string> {
+  // JPEG attachments only — never send PDF bytes to the OCR agent.
   const attachments: AgentAttachment[] = batch.jpegs.map((jpeg) => ({
     data_base64: jpeg.toString("base64"),
     mime_type: "image/jpeg",
   }));
 
   const raw = await hikigai.invokeAgent(
-    "mri-report-ocr-agent",
+    MRI_OCR_AGENT,
     {
       filename,
       start_page: batch.startPage,
@@ -104,7 +148,7 @@ async function invokeOcrBatch(
     attachments
   );
 
-  const output = extractAgentOutput(raw);
+  const output = parseAgentPayload(raw);
   const extracted =
     typeof output.extracted_text === "string" ? output.extracted_text.trim() : "";
 
@@ -133,6 +177,10 @@ async function ocrScannedPdf(filename: string, bytes: Buffer): Promise<string> {
   return batchTexts.join("\n\n").trim();
 }
 
+/**
+ * Step 2–3: digital MuPDF text, or scanned → JPEG → OCR agent.
+ * PDF bytes never leave this process toward either agent.
+ */
 export async function extractFileText(file: MriInputFile): Promise<string> {
   if (isPdfBytes(file.bytes)) {
     const pdfText = extractPdfText(file.bytes);
@@ -145,6 +193,7 @@ export async function extractFileText(file: MriInputFile): Promise<string> {
   return decodeTextFile(file.bytes).trim();
 }
 
+/** Step 4 — stitch reports for the summary agent. */
 export function stitchReportTexts(
   files: Array<{ filename: string; text: string }>
 ): string {
@@ -157,6 +206,10 @@ export function stitchReportTexts(
     .trim();
 }
 
+/**
+ * Step 5 wrapper — must match this string exactly.
+ * Summary agent receives text only (no attachments / no PDF).
+ */
 export function buildSummaryMessage(combinedText: string): string {
   return (
     "You are given one or more MRI radiology reports for a single patient.\n\n" +
@@ -165,20 +218,13 @@ export function buildSummaryMessage(combinedText: string): string {
   );
 }
 
-function normalizeStudy(raw: Record<string, unknown>): MriStudy {
-  const findingsRaw = Array.isArray(raw.findings) ? raw.findings : [];
-  const findings: MriFinding[] = findingsRaw
-    .map((item) => {
-      if (!item || typeof item !== "object") return null;
-      const row = item as Record<string, unknown>;
-      const pathology =
-        typeof row.pathology === "string" ? row.pathology.trim() : "";
-      const details = typeof row.details === "string" ? row.details.trim() : "";
-      if (!pathology && !details) return null;
-      return { pathology, details };
-    })
-    .filter((item): item is MriFinding => item !== null);
+function normalizeFindings(raw: unknown): Array<MriFinding | string> {
+  // Keep agent findings exactly as returned — no reformatting.
+  if (!Array.isArray(raw)) return [];
+  return raw as Array<MriFinding | string>;
+}
 
+function normalizeStudy(raw: Record<string, unknown>): MriStudy {
   return {
     filename: typeof raw.filename === "string" ? raw.filename : "",
     region: typeof raw.region === "string" ? raw.region : "",
@@ -190,14 +236,16 @@ function normalizeStudy(raw: Record<string, unknown>): MriStudy {
       typeof raw.findings_text === "string" ? raw.findings_text : "",
     impressions_text:
       typeof raw.impressions_text === "string" ? raw.impressions_text : "",
-    findings,
+    findings: normalizeFindings(raw.findings),
   };
 }
 
 export function parseSummaryOutput(payload: unknown): MriClinicalSummaryData {
-  const output = extractAgentOutput(payload);
+  const output = parseAgentPayload(payload);
   const patient_label =
-    typeof output.patient_label === "string" ? output.patient_label : "PATIENT 1";
+    typeof output.patient_label === "string" && output.patient_label.trim()
+      ? output.patient_label.trim()
+      : "PATIENT 1";
 
   const studiesRaw = Array.isArray(output.studies) ? output.studies : [];
   const studies = studiesRaw
@@ -211,6 +259,13 @@ export function parseSummaryOutput(payload: unknown): MriClinicalSummaryData {
   return { patient_label, studies };
 }
 
+/**
+ * Full pipeline:
+ * 1. extract text per file (MuPDF or OCR)
+ * 2. stitch === REPORT n === / FILENAME:
+ * 3. send that combined PDF text to mri-clinical-summary-agent
+ * 4. return { patient_label, studies }
+ */
 export async function generateMriClinicalSummary(
   files: MriInputFile[]
 ): Promise<MriClinicalSummaryData> {
@@ -228,12 +283,35 @@ export async function generateMriClinicalSummary(
     throw new Error("No extractable text from uploaded MRI files");
   }
 
+  // Summary agent gets text only — stitched report text inside the fixed wrapper.
   const message = buildSummaryMessage(combinedText);
+
+  console.log("[mri-clinical-summary] invoking summary agent", {
+    files: extracted.map((f) => f.filename),
+    combinedTextChars: combinedText.length,
+    messageChars: message.length,
+  });
+
   const raw = await hikigai.invokeAgent(
-    "mri-clinical-summary-agent",
+    MRI_SUMMARY_AGENT,
     { message },
     MRI_AGENT_TIMEOUT_MS
   );
 
-  return parseSummaryOutput(raw);
+  console.log(
+    "[mri-clinical-summary] summary agent raw response:",
+    JSON.stringify(raw, null, 2)
+  );
+
+  const data = parseSummaryOutput(raw);
+  console.log(
+    "[mri-clinical-summary] summary agent parsed data:",
+    JSON.stringify(data, null, 2)
+  );
+
+  if (!data.studies.length) {
+    throw new Error("Summary agent returned no studies");
+  }
+
+  return data;
 }
