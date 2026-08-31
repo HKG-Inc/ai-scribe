@@ -1,6 +1,6 @@
 import { Amplify } from "aws-amplify";
 
-const DEFAULT_USER_POOL_ID = process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID || "us-east-2_3OB0hxGIC";
+const DEFAULT_USER_POOL_ID = process.env.NEXT_PUBLIC_COGNITO_USER_POOL_ID || "us-east-2_Xqdlyxuta";
 const DEFAULT_USER_POOL_CLIENT_ID =
   process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID || "osf07sbf6289enje270i5psbq";
 
