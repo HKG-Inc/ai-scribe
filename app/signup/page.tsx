@@ -18,29 +18,12 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatAuthError, trimAuthInput } from "@/lib/auth/errors";
 import { getPersonNameError } from "@/lib/utils";
-import {
-  mapEndUserToUserFields,
-  syncEndUserProfile,
-  updateEndUserProfile,
-} from "@/lib/auth/profile";
-import {
-  DEFAULT_SUBSCRIPTION_MINUTES,
-  MINUTES_LEFT_ATTRIBUTE,
-  parseMinutesLeft,
-  syncMinutesLeft,
-} from "@/lib/auth/minutes";
 import { SPECIALTIES } from "@/lib/specialties";
-import { useAppDispatch } from "@/store/hooks";
-import { setLoggedIn, setUser } from "@/store/slices/userSlice";
 import {
-  consumePendingSignupProfile,
-  decodeIdToken,
   ensureIdentitySession,
   hasValidIdentitySession,
   identityApi,
   savePendingSignupProfile,
-  sessionFromLoginResponse,
-  setIdentitySession,
 } from "@/lib/auth/session";
 
 const COUNTRY_CODES = [
@@ -80,7 +63,6 @@ function InfoTooltip({ text }: { text: string }) {
 
 export default function SignupPage() {
   const router = useRouter();
-  const dispatch = useAppDispatch();
 
   useEffect(() => {
     let isMounted = true;
@@ -214,123 +196,7 @@ export default function SignupPage() {
         return;
       }
 
-      const loginResult = await identityApi<{
-        status: string;
-        challenge_name?: string;
-        id_token?: string;
-        access_token?: string;
-        refresh_token?: string;
-        expires_in?: number;
-        token_type?: string;
-        user_sub?: string;
-        user_id?: string;
-      }>("/api/identity/login", {
-        email: trimmedForm.email,
-        password: trimmedForm.password,
-      });
-
-      if (loginResult.status === "challenge" || loginResult.challenge_name) {
-        router.push(`/login?email=${encodeURIComponent(trimmedForm.email)}`);
-        return;
-      }
-
-      if (
-        loginResult.status !== "authenticated" ||
-        !loginResult.id_token ||
-        !loginResult.access_token ||
-        !loginResult.refresh_token ||
-        !loginResult.expires_in
-      ) {
-        router.push(`/login?email=${encodeURIComponent(trimmedForm.email)}`);
-        return;
-      }
-
-      const session = sessionFromLoginResponse(
-        {
-          id_token: loginResult.id_token,
-          access_token: loginResult.access_token,
-          refresh_token: loginResult.refresh_token,
-          expires_in: loginResult.expires_in,
-          token_type: loginResult.token_type || "Bearer",
-          user_sub: loginResult.user_sub,
-          user_id: loginResult.user_id,
-        },
-        trimmedForm.email
-      );
-      setIdentitySession(session);
-
-      try {
-        if (session.userId) {
-          const profile = await updateEndUserProfile(session.userId, {
-            first_name: trimmedForm.firstName,
-            last_name: trimmedForm.lastName,
-            role: trimmedForm.specialty,
-          });
-          const fields = mapEndUserToUserFields(profile);
-          const claims = decodeIdToken(loginResult.id_token);
-          const pending = consumePendingSignupProfile();
-          dispatch(
-            setUser({
-              ...fields,
-              phone: pending?.phone || phoneNumber,
-              clinicName: pending?.clinicName ?? trimmedForm.clinicName,
-              totalMinutesLeft: parseMinutesLeft(
-                claims?.[MINUTES_LEFT_ATTRIBUTE] as string | undefined
-              ),
-              totalMinutesAllowed: DEFAULT_SUBSCRIPTION_MINUTES,
-            })
-          );
-        } else {
-          const claims = decodeIdToken(loginResult.id_token);
-          const pending = consumePendingSignupProfile();
-          dispatch(
-            setUser({
-              firstName: claims?.given_name ?? pending?.firstName ?? trimmedForm.firstName,
-              lastName: claims?.family_name ?? pending?.lastName ?? trimmedForm.lastName,
-              email: claims?.email ?? trimmedForm.email,
-              phone: pending?.phone || phoneNumber,
-              speciality:
-                (claims?.role as string | undefined) ??
-                (claims?.["custom:role"] as string | undefined) ??
-                pending?.speciality ??
-                trimmedForm.specialty,
-              clinicName: pending?.clinicName ?? trimmedForm.clinicName,
-              totalMinutesLeft: parseMinutesLeft(
-                claims?.[MINUTES_LEFT_ATTRIBUTE] as string | undefined
-              ),
-              totalMinutesAllowed: DEFAULT_SUBSCRIPTION_MINUTES,
-            })
-          );
-        }
-      } catch {
-        const claims = decodeIdToken(loginResult.id_token);
-        const pending = consumePendingSignupProfile();
-        dispatch(
-          setUser({
-            firstName: claims?.given_name ?? pending?.firstName ?? trimmedForm.firstName,
-            lastName: claims?.family_name ?? pending?.lastName ?? trimmedForm.lastName,
-            email: claims?.email ?? trimmedForm.email,
-            phone: pending?.phone || phoneNumber,
-            speciality:
-              (claims?.role as string | undefined) ??
-              (claims?.["custom:role"] as string | undefined) ??
-              pending?.speciality ??
-              trimmedForm.specialty,
-            clinicName: pending?.clinicName ?? trimmedForm.clinicName,
-            totalMinutesLeft: parseMinutesLeft(
-              claims?.[MINUTES_LEFT_ATTRIBUTE] as string | undefined
-            ),
-            totalMinutesAllowed: DEFAULT_SUBSCRIPTION_MINUTES,
-          })
-        );
-      }
-
-      dispatch(setLoggedIn(true));
-      void syncMinutesLeft(dispatch);
-      void syncEndUserProfile(dispatch).catch(() => {
-        // Profile already seeded above.
-      });
-      router.push("/recording");
+      router.push(`/login?email=${encodeURIComponent(trimmedForm.email)}&signup=success`);
     } catch (error) {
       setServerError(formatAuthError(error, "Sign up failed. Please try again."));
     } finally {

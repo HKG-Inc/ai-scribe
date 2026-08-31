@@ -1,6 +1,18 @@
 export const DEFAULT_RELAY_URL =
-  "wss://hikigai-websocket-bb3ecd8d.apps.hikigaiplatform.io/relay";
+  "wss://hikigai-websocket-1-3ecbb3c6.apps.hikigaiplatform.io/relay";
 export const DEFAULT_RELAY_TOKEN = "9c82c2eb-0c7f-47dc-b52f-e8b958c21a41";
+
+/** Browser WebSocket needs wss:// (or ws://); allow https:// in env for convenience. */
+export function toWebSocketUrl(url: string): string {
+  const trimmed = url.trim();
+  if (trimmed.startsWith("https://")) {
+    return `wss://${trimmed.slice("https://".length)}`;
+  }
+  if (trimmed.startsWith("http://")) {
+    return `ws://${trimmed.slice("http://".length)}`;
+  }
+  return trimmed;
+}
 
 export const TRANSCRIPT_KIND = "carepilot-live-transcript";
 /** Wire sender the companion app already understands. */
@@ -110,7 +122,9 @@ export type RelayJsonEnvelope = {
 
 export function transcriptRelayConfig() {
   return {
-    url: process.env.NEXT_PUBLIC_HIKIGAI_CONNECT_URL || DEFAULT_RELAY_URL,
+    url: toWebSocketUrl(
+      process.env.NEXT_PUBLIC_HIKIGAI_CONNECT_URL || DEFAULT_RELAY_URL
+    ),
     token: process.env.NEXT_PUBLIC_HIKIGAI_CONNECT_TOKEN || DEFAULT_RELAY_TOKEN,
   };
 }

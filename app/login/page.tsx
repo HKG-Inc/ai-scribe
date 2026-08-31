@@ -62,6 +62,7 @@ export default function LoginPage() {
   }, [router]);
 
   const [email, setEmail] = useState(() => searchParams.get("email") ?? "");
+  const signupSuccess = searchParams.get("signup") === "success";
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -348,6 +349,12 @@ export default function LoginPage() {
             <div className="mb-4 p-3 bg-red-50 border border-red-200 text-red-600 rounded-lg flex items-center">
               <AlertCircle className="h-4 w-4 mr-2 shrink-0" />
               <span className="text-sm">{error}</span>
+            </div>
+          )}
+
+          {signupSuccess && !error && (
+            <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm">
+              Account created successfully. Sign in with your new credentials.
             </div>
           )}
 

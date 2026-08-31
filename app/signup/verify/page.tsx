@@ -67,7 +67,7 @@ export default function VerifySignupPage() {
         email,
         code: trimmedCode,
       });
-      router.push(`/login?email=${encodeURIComponent(email)}`);
+      router.push(`/login?email=${encodeURIComponent(email)}&signup=success`);
     } catch (err) {
       setError(formatAuthError(err, "Verification failed. Please try again."));
     } finally {

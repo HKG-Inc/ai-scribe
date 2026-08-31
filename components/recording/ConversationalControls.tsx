@@ -29,7 +29,6 @@ import {
   PARENT_LANGUAGE,
   PATIENT_LANGUAGES,
   QUESTIONS,
-  languageLabel,
 } from "@/lib/conversation-mode";
 import { useQuestionnaireFlow } from "@/hooks/useQuestionnaireFlow";
 import { cn } from "@/lib/utils";
@@ -77,10 +76,7 @@ export function ConversationalControls({
       const { translatedText } = await playQuestion(index, language);
       dispatch(
         setCurrentQuestionTranslated(
-          translatedText ||
-            (language !== PARENT_LANGUAGE
-              ? `[Audio in ${languageLabel(language)}]`
-              : question.text_en)
+          translatedText || (language === PARENT_LANGUAGE ? question.text_en : "")
         )
       );
       dispatch(setQuestionnaireStatus("Ready to record your answer"));
