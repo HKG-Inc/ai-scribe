@@ -4,7 +4,8 @@ import { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Eye } from "lucide-react";
 import { useAppSelector } from "@/store/hooks";
-import { PARENT_LANGUAGE, QUESTIONS } from "@/lib/conversation-mode";
+import { PARENT_LANGUAGE, QUESTIONS, isNoSpeechResponse } from "@/lib/conversation-mode";
+import { PatientAnswerDisplay } from "@/components/recording/PatientAnswerDisplay";
 import type { RecordingMode } from "@/store/slices/recordingSlice";
 
 interface TranscriptionPanelProps {
@@ -95,16 +96,15 @@ export function TranscriptionPanel({
                   </div>
                 )}
                 <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>
-                <div className="text-base text-slate-700">
-                  {qa.responseTranslated?.english_translation || (
-                    <p className="text-slate-400 text-sm">Skipped</p>
-                  )}
-                </div>
-                {qa.responseTranslated && selectedLanguage !== PARENT_LANGUAGE && (
-                  <div className="text-base text-slate-600 italic" dir="auto">
-                    {qa.responseTranslated.original_text}
-                  </div>
-                )}
+                <PatientAnswerDisplay
+                  original={qa.responseTranslated?.original_text}
+                  english={
+                    qa.responseTranslated?.english_translation || qa.responseEn
+                  }
+                  language={selectedLanguage}
+                  skipped={!qa.responseTranslated && qa.responseEn === "Skipped"}
+                  noSpeech={isNoSpeechResponse(qa.responseEn)}
+                />
               </div>
             ))}
 
@@ -129,18 +129,16 @@ export function TranscriptionPanel({
                   <>
                     <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>
                     {currentResponseTranslated ? (
-                      <>
-                        <div className="text-base text-slate-700">
-                          {currentResponseTranslated.english_translation}
-                        </div>
-                        {selectedLanguage !== PARENT_LANGUAGE && (
-                          <div className="text-base text-slate-600 italic" dir="auto">
-                            {currentResponseTranslated.original_text}
-                          </div>
-                        )}
-                      </>
+                      <PatientAnswerDisplay
+                        original={currentResponseTranslated.original_text}
+                        english={currentResponseTranslated.english_translation}
+                        language={selectedLanguage}
+                      />
                     ) : (
-                      <div className="text-base text-slate-700">{currentQuestionResponse}</div>
+                      <PatientAnswerDisplay
+                        english={currentQuestionResponse}
+                        noSpeech={isNoSpeechResponse(currentQuestionResponse)}
+                      />
                     )}
                   </>
                 )}

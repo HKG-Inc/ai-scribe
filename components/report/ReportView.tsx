@@ -33,6 +33,8 @@ import {
   qaHistoryToQuestionnaireResponses,
 } from "@/lib/questionnaire-visit-notes";
 import { formatReferralUrgency } from "@/lib/referrals";
+import { PatientAnswerDisplay } from "@/components/recording/PatientAnswerDisplay";
+import { isNoSpeechResponse } from "@/lib/conversation-mode";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
 import { toUserFacingApiError } from "@/lib/api-errors";
@@ -1581,11 +1583,15 @@ function TranscriptionTab() {
                         <p className="text-sm text-slate-500 italic">{qa.questionTranslated}</p>
                       )}
                       <p className="text-sm font-semibold text-brand-orange mt-2">Patient</p>
-                      <p className="text-base text-slate-700">
-                        {qa.responseTranslated?.english_translation || (
-                          <span className="text-slate-400 italic">Skipped</span>
-                        )}
-                      </p>
+                      <PatientAnswerDisplay
+                        original={qa.responseTranslated?.original_text}
+                        english={
+                          qa.responseTranslated?.english_translation || qa.responseEn
+                        }
+                        language={qa.language}
+                        skipped={!qa.responseTranslated && qa.responseEn === "Skipped"}
+                        noSpeech={isNoSpeechResponse(qa.responseEn)}
+                      />
                     </div>
                   ))}
                 </div>

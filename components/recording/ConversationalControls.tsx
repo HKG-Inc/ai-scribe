@@ -26,12 +26,15 @@ import {
 } from "@/store/slices/recordingSlice";
 import {
   createQuestionnaireTimestamp,
+  isNoSpeechResponse,
+  NO_SPEECH_DETECTED,
   PARENT_LANGUAGE,
   PATIENT_LANGUAGES,
   QUESTIONS,
 } from "@/lib/conversation-mode";
 import { useQuestionnaireFlow } from "@/hooks/useQuestionnaireFlow";
 import { cn } from "@/lib/utils";
+import { isEmptyReply } from "@/lib/questionnaire/live-client";
 
 interface ConversationalControlsProps {
   isVisitRecording: boolean;
@@ -59,11 +62,22 @@ export function ConversationalControls({
     questionnaireStatus,
   } = useAppSelector((s) => s.recording);
 
-  const { playQuestion, cancelPlay, startRecording, stopRecordingAndTranscribe } =
-    useQuestionnaireFlow();
+  const {
+    playQuestion,
+    cancelPlay,
+    startRecording,
+    stopRecordingAndTranscribe,
+    startQuestionnaireReplySession,
+    stopQuestionnaireReplySession,
+    setAnswerRecordingPaused,
+  } = useQuestionnaireFlow();
   const [isQuestionnaireStarting, setIsQuestionnaireStarting] = useState(false);
   const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
   const isBusyRef = useRef(false);
+
+  const hasValidResponse =
+    !!currentQuestionResponse && !isNoSpeechResponse(currentQuestionResponse);
+  const canAdvanceToNext = hasValidResponse || isNoSpeechResponse(currentQuestionResponse);
 
   if (isVisitRecording) return null;
 
@@ -97,20 +111,22 @@ export function ConversationalControls({
     if (!question || !selectedLanguage || !currentQuestionResponse) return;
 
     const isSkipped = currentQuestionResponse === "Skipped";
+    const isNoSpeech = isNoSpeechResponse(currentQuestionResponse);
     dispatch(
       addQAHistory({
         question_id: question.id,
         questionEn: question.text_en,
         questionTranslated: currentQuestionTranslated,
         responseEn: currentQuestionResponse,
-        responseTranslated: isSkipped
-          ? null
-          : {
-              english_translation:
-                currentResponseTranslated?.english_translation || currentQuestionResponse,
-              original_text:
-                currentResponseTranslated?.original_text || currentQuestionResponse,
-            },
+        responseTranslated:
+          isSkipped || isNoSpeech
+            ? null
+            : {
+                english_translation:
+                  currentResponseTranslated?.english_translation || currentQuestionResponse,
+                original_text:
+                  currentResponseTranslated?.original_text || currentQuestionResponse,
+              },
         language: selectedLanguage,
         timestamp: createQuestionnaireTimestamp(),
         questionNumber: currentQuestionIndex + 1,
@@ -120,6 +136,7 @@ export function ConversationalControls({
 
   const advanceOrComplete = async (nextIndex: number, language: string) => {
     if (nextIndex >= QUESTIONS.length) {
+      stopQuestionnaireReplySession();
       dispatch(completeQuestionnaire());
       toast.success("Questionnaire completed! You can now record the visit notes.");
       return;
@@ -139,8 +156,14 @@ export function ConversationalControls({
     isBusyRef.current = true;
     setIsQuestionnaireStarting(true);
     try {
+      await startQuestionnaireReplySession();
       dispatch(startQuestionnaire());
       await playCurrentQuestion(0, selectedLanguage);
+    } catch (error) {
+      stopQuestionnaireReplySession();
+      const message =
+        error instanceof Error ? error.message : "Failed to start questionnaire";
+      toast.error(message);
     } finally {
       setIsQuestionnaireStarting(false);
       isBusyRef.current = false;
@@ -148,7 +171,7 @@ export function ConversationalControls({
   };
 
   const handleNextQuestion = async () => {
-    if (!currentQuestionResponse || !selectedLanguage || isBusyRef.current) return;
+    if (!canAdvanceToNext || !selectedLanguage || isBusyRef.current) return;
 
     saveCurrentToHistory();
 
@@ -188,6 +211,7 @@ export function ConversationalControls({
     isBusyRef.current = true;
     try {
       if (nextIndex >= QUESTIONS.length) {
+        stopQuestionnaireReplySession();
         dispatch(completeQuestionnaire());
         toast.success("Questionnaire completed! You can now record the visit notes.");
         return;
@@ -217,14 +241,10 @@ export function ConversationalControls({
         const english = structured?.english?.trim() || "";
         const original = structured?.original?.trim() || english;
 
-        if (!english) {
-          dispatch(setCurrentQuestionResponse("(No speech detected)"));
-          dispatch(
-            setCurrentResponseTranslated({
-              english_translation: "(No speech detected)",
-              original_text: original || "(No speech detected)",
-            })
-          );
+        if (!english || isEmptyReply(structured)) {
+          dispatch(setCurrentQuestionResponse(NO_SPEECH_DETECTED));
+          dispatch(setCurrentResponseTranslated(null));
+          dispatch(setQuestionnaireStatus("Ready to record your answer"));
         } else {
           dispatch(setCurrentQuestionResponse(english));
           dispatch(
@@ -233,22 +253,26 @@ export function ConversationalControls({
               original_text: original || english,
             })
           );
+          dispatch(setQuestionnaireStatus(""));
         }
-        dispatch(setQuestionnaireStatus(""));
       } catch (error) {
+        dispatch(setCurrentQuestionResponse(NO_SPEECH_DETECTED));
+        dispatch(setCurrentResponseTranslated(null));
         const message =
           error instanceof Error ? error.message : "Failed to process answer";
         toast.error(message);
-        dispatch(setQuestionnaireStatus(""));
+        dispatch(setQuestionnaireStatus("Ready to record your answer"));
       } finally {
         setIsProcessingAnswer(false);
       }
       return;
     }
 
-    if (currentQuestionResponse) return;
+    if (hasValidResponse) return;
 
     try {
+      dispatch(setCurrentQuestionResponse(""));
+      dispatch(setCurrentResponseTranslated(null));
       dispatch(setRecordingAnswer(true));
       dispatch(setAnswerPaused(false));
       dispatch(setQuestionnaireStatus("Recording your answer..."));
@@ -264,10 +288,12 @@ export function ConversationalControls({
 
   const handlePauseResumeAnswer = () => {
     if (!isRecordingAnswer) return;
-    dispatch(setAnswerPaused(!isAnswerPaused));
+    const paused = !isAnswerPaused;
+    dispatch(setAnswerPaused(paused));
+    setAnswerRecordingPaused(paused);
     dispatch(
       setQuestionnaireStatus(
-        isAnswerPaused ? "Recording your answer..." : "Answer recording paused"
+        paused ? "Answer recording paused" : "Recording your answer..."
       )
     );
   };
@@ -307,14 +333,11 @@ export function ConversationalControls({
       </div>
 
       <div className="flex items-center gap-4 flex-wrap justify-center">
-        {!questionnaireCompleted &&
-          questionnaireStarted &&
-          !isRecordingAnswer &&
-          !isAnswerPaused && (
+        {!questionnaireCompleted && questionnaireStarted && !isRecordingAnswer && !isAnswerPaused && (
             <button
               className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg text-sm"
               onClick={() => void handleSkip()}
-              disabled={isProcessingAnswer || isQuestionnaireStarting}
+              disabled={isQuestionnaireStarting}
             >
               Skip
             </button>
@@ -323,7 +346,7 @@ export function ConversationalControls({
         {!questionnaireCompleted && (
           <button
             onClick={() =>
-              void (questionnaireStarted && currentQuestionResponse
+              void (questionnaireStarted && canAdvanceToNext
                 ? handleNextQuestion()
                 : handleStartQuestionnaire())
             }
@@ -338,9 +361,8 @@ export function ConversationalControls({
               isRecordingAnswer ||
               isAnswerPaused ||
               isQuestionnaireStarting ||
-              isProcessingAnswer ||
               questionnaireCompleted ||
-              (questionnaireStarted && !currentQuestionResponse)
+              (questionnaireStarted && !canAdvanceToNext)
             }
           >
             {questionnaireStarted
@@ -363,7 +385,7 @@ export function ConversationalControls({
 
       {(questionnaireStarted || questionnaireCompleted) && (
         <div className="flex space-x-4 items-center">
-          {questionnaireStarted && isRecordingAnswer && (
+          {questionnaireStarted && isRecordingAnswer && !isProcessingAnswer && (
             <button
               onClick={handlePauseResumeAnswer}
               className="px-4 bg-orange-400 hover:bg-orange-500 text-white rounded-lg h-12 text-base font-medium shadow-sm"
@@ -376,22 +398,27 @@ export function ConversationalControls({
             <button
               onClick={() => void handleRecordAnswer()}
               className={cn(
-                "px-4 rounded-lg h-12 text-base font-medium shadow-sm",
-                isRecordingAnswer
-                  ? "bg-red-500 hover:bg-red-600 text-white"
-                  : currentQuestionResponse
-                    ? "bg-slate-200 text-slate-400"
-                    : "bg-brand-green hover:bg-opacity-90 text-white"
+                "px-4 rounded-lg h-12 text-base font-medium shadow-sm flex items-center gap-2 min-w-[160px] justify-center",
+                isProcessingAnswer
+                  ? "bg-sky-400 text-white cursor-wait"
+                  : isRecordingAnswer
+                    ? "bg-red-500 hover:bg-red-600 text-white"
+                    : hasValidResponse
+                      ? "bg-slate-200 text-slate-400"
+                      : "bg-brand-green hover:bg-opacity-90 text-white"
               )}
-              disabled={
-                (!!currentQuestionResponse && !isRecordingAnswer) || isProcessingAnswer
-              }
+              disabled={isProcessingAnswer || (hasValidResponse && !isRecordingAnswer)}
             >
-              {isRecordingAnswer
-                ? isProcessingAnswer
-                  ? "Processing..."
-                  : "Stop Recording"
-                : "Record Answer"}
+              {isProcessingAnswer ? (
+                <>
+                  Processing...
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                </>
+              ) : isRecordingAnswer ? (
+                "Stop Recording"
+              ) : (
+                "Record Answer"
+              )}
             </button>
           ) : questionnaireCompleted ? (
             <button

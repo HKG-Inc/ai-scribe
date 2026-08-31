@@ -1,7 +1,6 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { toast } from "sonner";
 import {
   PARENT_LANGUAGE,
   QUESTIONS,
@@ -11,7 +10,6 @@ import {
 import {
   QUESTIONNAIRE_PLAY_AGENT,
   QUESTIONNAIRE_REPLY_AGENT,
-  PCM_SEND_GAP_MS,
   MIN_ANSWER_SAMPLES,
   REPLY_MAX_WAIT_MS,
   REPLY_QUIET_MS,
@@ -25,16 +23,18 @@ import {
   disconnectLive,
   endTurn,
   extractStructured,
-  hasFullReply,
+  hasUsableReply,
   isSocketOpen,
   joinReplyText,
   mintQuestionnaireLiveSession,
   parseLiveEvent,
+  pcmRms,
+  resamplePcm16,
   sendPcm,
   sendText,
-  splitIntoSendChunks,
   sleep,
   startTurn,
+  TARGET_PCM_SAMPLE_RATE,
   type LiveSessionInfo,
   type ReplyStructured,
 } from "@/lib/questionnaire/live-client";
@@ -54,6 +54,14 @@ async function fetchCannedQuestion(
   const params = new URLSearchParams({ language, question_id: questionId });
   const response = await apiFetch(`/api/questionnaire/canned?${params.toString()}`);
   return (await response.json()) as CannedQuestionResponse;
+}
+
+function isEmitTranscriptionEvent(parsed: Record<string, unknown>): boolean {
+  if (parsed.type !== "tool_call" && parsed.type !== "function_call") {
+    return false;
+  }
+  const name = parsed.name ?? parsed.tool;
+  return name === "emit_transcription";
 }
 
 async function playWavUrl(wavUrl: string, signal: AbortSignal): Promise<void> {
@@ -105,10 +113,17 @@ export function useQuestionnaireFlow() {
   const recCtxRef = useRef<AudioContext | null>(null);
   const recNodeRef = useRef<AudioWorkletNode | null>(null);
   const recStreamRef = useRef<MediaStream | null>(null);
+  const recSampleRateRef = useRef(TARGET_PCM_SAMPLE_RATE);
   const pcmPartsRef = useRef<Int16Array[]>([]);
   const replySegmentsRef = useRef<ReplyStructured[]>([]);
   const replyStructuredRef = useRef<ReplyStructured | null>(null);
   const replyAbortRef = useRef(false);
+  const replyTurnEndedRef = useRef(false);
+  /** Live PCM is streamed only while the patient is recording an answer. */
+  const replySendingEnabledRef = useRef(false);
+  /** Block mic → reply-agent while a question is playing (avoid question audio as input). */
+  const replyInputBlockedRef = useRef(false);
+  const answerTurnActiveRef = useRef(false);
 
   const ensurePlayer = useCallback(async () => {
     if (playerNodeRef.current) return;
@@ -153,6 +168,141 @@ export function useQuestionnaireFlow() {
       }
     });
     return ws;
+  }, []);
+
+  const rememberReplySegment = useCallback((found: ReplyStructured) => {
+    if (!hasUsableReply(found)) return;
+    const last = replySegmentsRef.current[replySegmentsRef.current.length - 1];
+    if (last && last.original === found.original && last.english === found.english) {
+      return;
+    }
+    replySegmentsRef.current.push(found);
+    replyStructuredRef.current = replySegmentsRef.current.reduce(
+      (acc, seg) => ({
+        original: joinReplyText(acc.original, seg.original),
+        english: joinReplyText(acc.english, seg.english),
+        language: seg.language || acc.language,
+      }),
+      { original: "", english: "", language: "" }
+    );
+  }, []);
+
+  const handleReplyEvent = useCallback(
+    (parsed: Record<string, unknown>) => {
+      if (
+        parsed.type === "end" ||
+        parsed.type === "turn_complete" ||
+        parsed.finished === true
+      ) {
+        replyTurnEndedRef.current = true;
+      }
+
+      const found = extractStructured(parsed);
+      if (found && isEmitTranscriptionEvent(parsed)) {
+        rememberReplySegment(found);
+      }
+    },
+    [rememberReplySegment]
+  );
+
+  const attachReplySocketHandlers = useCallback(
+    (ws: WebSocket) => {
+      ws.onmessage = (event) => {
+        void (async () => {
+          let payload: string | ArrayBuffer = event.data;
+          if (payload instanceof Blob) {
+            payload = await payload.arrayBuffer();
+          }
+          const parsed = parseLiveEvent(payload);
+          if (parsed.binary) return;
+          handleReplyEvent(parsed as Record<string, unknown>);
+        })();
+      };
+
+      ws.addEventListener("close", () => {
+        if (replyWsRef.current === ws) {
+          replyWsRef.current = null;
+          answerTurnActiveRef.current = false;
+          replySendingEnabledRef.current = false;
+        }
+      });
+    },
+    [handleReplyEvent]
+  );
+
+  const connectReplyLive = useCallback(async () => {
+    if (isSocketOpen(replyWsRef.current) && replySessionRef.current) {
+      return replyWsRef.current!;
+    }
+
+    disconnectLive(replyWsRef.current);
+    replyWsRef.current = null;
+    replySessionRef.current = null;
+
+    const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_REPLY_AGENT);
+    replySessionRef.current = session;
+    const ws = await connectLiveSocket(session);
+    replyWsRef.current = ws;
+    attachReplySocketHandlers(ws);
+    return ws;
+  }, [attachReplySocketHandlers]);
+
+  /** Open reply-agent WebSocket for the whole questionnaire (no audio turn yet). */
+  const startQuestionnaireReplySession = useCallback(async () => {
+    await connectReplyLive();
+  }, [connectReplyLive]);
+
+  /** Close reply-agent session when questionnaire ends. */
+  const stopQuestionnaireReplySession = useCallback(() => {
+    replySendingEnabledRef.current = false;
+    replyInputBlockedRef.current = false;
+    answerTurnActiveRef.current = false;
+    disconnectLive(replyWsRef.current);
+    replyWsRef.current = null;
+    replySessionRef.current = null;
+  }, []);
+
+  const setReplyInputBlocked = useCallback((blocked: boolean) => {
+    replyInputBlockedRef.current = blocked;
+  }, []);
+
+  const sendLivePcmChunk = useCallback((chunk: Int16Array) => {
+    if (
+      !replySendingEnabledRef.current ||
+      replyInputBlockedRef.current ||
+      !answerTurnActiveRef.current
+    ) {
+      return;
+    }
+
+    const ws = replyWsRef.current;
+    if (!isSocketOpen(ws)) return;
+
+    let toSend = chunk;
+    if (recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE) {
+      toSend = resamplePcm16(chunk, recSampleRateRef.current, TARGET_PCM_SAMPLE_RATE);
+    }
+    sendPcm(ws!, toSend);
+  }, []);
+
+  const beginAnswerTurn = useCallback(async () => {
+    replyStructuredRef.current = null;
+    replySegmentsRef.current = [];
+    replyAbortRef.current = false;
+    replyTurnEndedRef.current = false;
+
+    const ws = await connectReplyLive();
+    if (!isSocketOpen(ws)) {
+      throw new Error("Reply agent session is not connected");
+    }
+
+    startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
+    answerTurnActiveRef.current = true;
+    replySendingEnabledRef.current = true;
+  }, [connectReplyLive]);
+
+  const setAnswerRecordingPaused = useCallback((paused: boolean) => {
+    replySendingEnabledRef.current = !paused && answerTurnActiveRef.current;
   }, []);
 
   const playViaAgent = useCallback(
@@ -231,27 +381,33 @@ export function useQuestionnaireFlow() {
       }
 
       cancelPlay();
+      setReplyInputBlocked(true);
+
       const controller = new AbortController();
       playAbortRef.current = controller;
 
       let translatedText = "";
       let usedCanned = false;
 
-      const canned = await fetchCannedQuestion(language, question.id);
-      if (canned.available && canned.text && canned.wav_url) {
-        translatedText = canned.text;
-        usedCanned = true;
-        await playWavUrl(canned.wav_url, controller.signal);
-      } else {
-        await playViaAgent(question, language, controller.signal);
-        translatedText =
-          language === PARENT_LANGUAGE ? question.text_en : "";
+      try {
+        const canned = await fetchCannedQuestion(language, question.id);
+        if (canned.available && canned.text && canned.wav_url) {
+          translatedText = canned.text;
+          usedCanned = true;
+          await playWavUrl(canned.wav_url, controller.signal);
+        } else {
+          await playViaAgent(question, language, controller.signal);
+          translatedText =
+            language === PARENT_LANGUAGE ? question.text_en : "";
+        }
+      } finally {
+        playAbortRef.current = null;
+        setReplyInputBlocked(false);
       }
 
-      playAbortRef.current = null;
       return { translatedText, usedCanned };
     },
-    [cancelPlay, playViaAgent]
+    [cancelPlay, playViaAgent, setReplyInputBlocked]
   );
 
   const stopMic = useCallback(() => {
@@ -267,98 +423,81 @@ export function useQuestionnaireFlow() {
 
   const startRecording = useCallback(async () => {
     cancelPlay();
+    setReplyInputBlocked(false);
     pcmPartsRef.current = [];
-    replyStructuredRef.current = null;
-    replySegmentsRef.current = [];
-    replyAbortRef.current = false;
+    replySendingEnabledRef.current = false;
+    answerTurnActiveRef.current = false;
 
-    recStreamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
-    recCtxRef.current = new AudioContext({ sampleRate: 16000 });
+    recStreamRef.current = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    recCtxRef.current = new AudioContext({
+      sampleRate: TARGET_PCM_SAMPLE_RATE,
+      latencyHint: "interactive",
+    });
+    recSampleRateRef.current = recCtxRef.current.sampleRate;
     await recCtxRef.current.audioWorklet.addModule(
       withBasePath("/pcm-recorder-processor.js")
     );
     recNodeRef.current = new AudioWorkletNode(recCtxRef.current, "pcm-recorder-processor");
-    recCtxRef.current.createMediaStreamSource(recStreamRef.current).connect(recNodeRef.current);
+    const source = recCtxRef.current.createMediaStreamSource(recStreamRef.current);
+    source.connect(recNodeRef.current);
+    const silentGain = recCtxRef.current.createGain();
+    silentGain.gain.value = 0;
+    recNodeRef.current.connect(silentGain);
+    silentGain.connect(recCtxRef.current.destination);
     recNodeRef.current.port.onmessage = (event) => {
-      pcmPartsRef.current.push(new Int16Array(event.data.slice(0)));
+      if (!(event.data instanceof ArrayBuffer)) return;
+      const chunk = new Int16Array(event.data.slice(0));
+      pcmPartsRef.current.push(chunk);
+      sendLivePcmChunk(chunk);
     };
-  }, [cancelPlay]);
-
-  const rememberReplySegment = useCallback((found: ReplyStructured) => {
-    if (!hasFullReply(found)) return;
-    const last = replySegmentsRef.current[replySegmentsRef.current.length - 1];
-    if (last && last.original === found.original && last.english === found.english) {
-      return;
-    }
-    replySegmentsRef.current.push(found);
-    replyStructuredRef.current = replySegmentsRef.current.reduce(
-      (acc, seg) => ({
-        original: joinReplyText(acc.original, seg.original),
-        english: joinReplyText(acc.english, seg.english),
-        language: seg.language || acc.language,
-      }),
-      { original: "", english: "", language: "" }
-    );
-  }, []);
-
-  const openReplyLive = useCallback(async () => {
-    replyStructuredRef.current = null;
-    replySegmentsRef.current = [];
-    replyAbortRef.current = false;
-
-    if (isSocketOpen(replyWsRef.current) && replySessionRef.current) {
-      const ws = replyWsRef.current!;
-      startTurn(ws, "audio", "audio/pcm;rate=16000");
-      return ws;
+    if (recCtxRef.current.state === "suspended") {
+      await recCtxRef.current.resume();
     }
 
-    disconnectLive(replyWsRef.current);
-    replyWsRef.current = null;
-
-    const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_REPLY_AGENT);
-    replySessionRef.current = session;
-    const ws = await connectLiveSocket(session);
-    replyWsRef.current = ws;
-
-    ws.onmessage = (event) => {
-      void (async () => {
-        let payload: string | ArrayBuffer = event.data;
-        if (payload instanceof Blob) {
-          payload = await payload.arrayBuffer();
-        }
-        const parsed = parseLiveEvent(payload);
-        if (parsed.binary) return;
-        const found =
-          extractStructured(parsed as Record<string, unknown>) ||
-          extractStructured({ content: parsed.content });
-        if (found) rememberReplySegment(found);
-      })();
-    };
-
-    ws.addEventListener("close", () => {
-      if (replyWsRef.current === ws) {
-        replyWsRef.current = null;
-      }
-    });
-
-    startTurn(ws, "audio", "audio/pcm;rate=16000");
-    return ws;
-  }, [rememberReplySegment]);
+    await beginAnswerTurn();
+  }, [beginAnswerTurn, cancelPlay, sendLivePcmChunk, setReplyInputBlocked]);
 
   const waitForReplyQuiet = useCallback(async (): Promise<ReplyStructured | null> => {
     const started = Date.now();
     let lastCount = replySegmentsRef.current.length;
     let lastChange = Date.now();
+    let turnEndedAt: number | null = null;
 
     while (Date.now() - started < REPLY_MAX_WAIT_MS) {
       if (replyAbortRef.current) break;
+
+      if (replyTurnEndedRef.current && turnEndedAt === null) {
+        turnEndedAt = Date.now();
+      }
+
       if (replySegmentsRef.current.length !== lastCount) {
         lastCount = replySegmentsRef.current.length;
         lastChange = Date.now();
       }
-      if (hasFullReply(replyStructuredRef.current) && Date.now() - lastChange >= REPLY_QUIET_MS) {
+
+      if (hasUsableReply(replyStructuredRef.current) && Date.now() - lastChange >= REPLY_QUIET_MS) {
         break;
       }
+
+      if (
+        turnEndedAt !== null &&
+        hasUsableReply(replyStructuredRef.current) &&
+        Date.now() - turnEndedAt >= 400
+      ) {
+        break;
+      }
+
+      if (turnEndedAt !== null && Date.now() - turnEndedAt >= 2500) {
+        break;
+      }
+
       await sleep(80);
     }
 
@@ -366,45 +505,57 @@ export function useQuestionnaireFlow() {
   }, []);
 
   const stopRecordingAndTranscribe = useCallback(async (): Promise<ReplyStructured | null> => {
+    replySendingEnabledRef.current = false;
     stopMic();
 
     const compressed = compressSilenceChunks(pcmPartsRef.current);
     pcmPartsRef.current = compressed.parts;
-    const pcm = concatInt16(pcmPartsRef.current);
+    let pcm = concatInt16(pcmPartsRef.current);
+
+    if (recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE) {
+      pcm = resamplePcm16(pcm, recSampleRateRef.current, TARGET_PCM_SAMPLE_RATE);
+    }
 
     if (pcm.length < MIN_ANSWER_SAMPLES) {
+      answerTurnActiveRef.current = false;
       throw new Error("Recording too short. Speak longer, then stop.");
     }
 
-    const ws = await openReplyLive();
-    const chunks = splitIntoSendChunks(pcm);
-
-    for (const chunk of chunks) {
-      if (!isSocketOpen(ws) || replyAbortRef.current) break;
-      sendPcm(ws, chunk);
-      await sleep(PCM_SEND_GAP_MS);
+    if (pcmRms(pcm) < 180) {
+      answerTurnActiveRef.current = false;
+      throw new Error("Could not detect speech in the recording. Speak louder and try again.");
     }
 
-    endTurn(ws);
+    const ws = replyWsRef.current;
+    if (!isSocketOpen(ws) || !answerTurnActiveRef.current) {
+      answerTurnActiveRef.current = false;
+      throw new Error("Reply agent session is not connected");
+    }
+
+    endTurn(ws!);
+    answerTurnActiveRef.current = false;
     return waitForReplyQuiet();
-  }, [openReplyLive, stopMic, waitForReplyQuiet]);
+  }, [stopMic, waitForReplyQuiet]);
 
   useEffect(() => {
     return () => {
       cancelPlay();
       stopMic();
+      stopQuestionnaireReplySession();
       disconnectLive(audioWsRef.current);
-      disconnectLive(replyWsRef.current);
       if (playerCtxRef.current) {
         void playerCtxRef.current.close();
       }
     };
-  }, [cancelPlay, stopMic]);
+  }, [cancelPlay, stopMic, stopQuestionnaireReplySession]);
 
   return {
     playQuestion,
     cancelPlay,
     startRecording,
     stopRecordingAndTranscribe,
+    startQuestionnaireReplySession,
+    stopQuestionnaireReplySession,
+    setAnswerRecordingPaused,
   };
 }

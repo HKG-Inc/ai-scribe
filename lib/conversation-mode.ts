@@ -5,6 +5,13 @@
 
 export const PARENT_LANGUAGE = "en-US";
 
+/** Shown in the questionnaire when the reply agent returns no emit_transcription. */
+export const NO_SPEECH_DETECTED = "(No speech detected)";
+
+export function isNoSpeechResponse(response: string | null | undefined): boolean {
+  return response === NO_SPEECH_DETECTED;
+}
+
 export interface Question {
   id: string;
   text_en: string;
@@ -164,6 +171,39 @@ export const QUESTIONS: Question[] = [
 
 export function languageLabel(code: string): string {
   return PATIENT_LANGUAGES.find((l) => l.value === code)?.label ?? code;
+}
+
+export function isEnglishPatientLanguage(language: string | null | undefined): boolean {
+  return !language || language === PARENT_LANGUAGE;
+}
+
+export type PatientAnswerLines = {
+  /** Shown alone when patient language is English. */
+  single?: string;
+  /** Patient's spoken language (first line when non-English). */
+  original?: string;
+  /** English translation (second line when non-English). */
+  english?: string;
+};
+
+/** Format emit_transcription-style answers for the UI. */
+export function getPatientAnswerLines(
+  original: string | undefined,
+  english: string | undefined,
+  selectedLanguage: string | null | undefined
+): PatientAnswerLines {
+  const orig = (original || "").trim();
+  const eng = (english || "").trim();
+
+  if (isEnglishPatientLanguage(selectedLanguage)) {
+    const single = eng || orig;
+    return single ? { single } : {};
+  }
+
+  const lines: PatientAnswerLines = {};
+  if (orig) lines.original = orig;
+  if (eng) lines.english = eng;
+  return lines;
 }
 
 export function createQuestionnaireTimestamp(): string {

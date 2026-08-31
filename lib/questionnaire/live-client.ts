@@ -4,6 +4,40 @@ import {
   PCM_CHUNK_SAMPLES,
 } from "@/lib/questionnaire/constants";
 
+export const TARGET_PCM_SAMPLE_RATE = 16000;
+
+export function pcmRms(pcm: Int16Array): number {
+  if (!pcm.length) return 0;
+  let sumSq = 0;
+  for (let i = 0; i < pcm.length; i++) {
+    sumSq += pcm[i] * pcm[i];
+  }
+  return Math.sqrt(sumSq / pcm.length);
+}
+
+export function resamplePcm16(
+  pcm: Int16Array,
+  fromRate: number,
+  toRate: number
+): Int16Array {
+  if (fromRate === toRate || !pcm.length) return pcm;
+
+  const ratio = fromRate / toRate;
+  const outLength = Math.max(1, Math.round(pcm.length / ratio));
+  const out = new Int16Array(outLength);
+
+  for (let i = 0; i < outLength; i++) {
+    const srcIndex = i * ratio;
+    const idx = Math.floor(srcIndex);
+    const frac = srcIndex - idx;
+    const s0 = pcm[idx] ?? 0;
+    const s1 = pcm[Math.min(idx + 1, pcm.length - 1)] ?? s0;
+    out[i] = Math.round(s0 + frac * (s1 - s0));
+  }
+
+  return out;
+}
+
 export function concatInt16(parts: Int16Array[]): Int16Array {
   let total = 0;
   for (const part of parts) total += part.length;
@@ -96,8 +130,73 @@ export function isEmptyReply(reply: ReplyStructured | null): boolean {
   return /NO_SPEECH|AUDIO_TOO_QUIET|NO_CLEAR_SPEECH/i.test(blob);
 }
 
+export function hasUsableReply(reply: ReplyStructured | null): boolean {
+  return Boolean(reply?.english?.trim() && !isEmptyReply(reply));
+}
+
 export function hasFullReply(reply: ReplyStructured | null): boolean {
-  return Boolean(reply && reply.english && reply.language && !isEmptyReply(reply));
+  return hasUsableReply(reply);
+}
+
+function parseMaybeJson(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return value;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
+  }
+}
+
+function structuredFromRecord(record: Record<string, unknown>): ReplyStructured | null {
+  const english = record.english ?? record.english_translation;
+  if (typeof english !== "string" || !english.trim()) {
+    return null;
+  }
+
+  const original =
+    typeof record.original === "string"
+      ? record.original
+      : typeof record.original_text === "string"
+        ? record.original_text
+        : "";
+
+  const language = typeof record.language === "string" ? record.language : "";
+
+  return {
+    original,
+    english: english.trim(),
+    language,
+  };
+}
+
+function findStructuredReply(value: unknown, depth = 0): ReplyStructured | null {
+  if (depth > 6 || value == null) return null;
+
+  const parsed = parseMaybeJson(value);
+  if (typeof parsed === "string") return null;
+
+  if (Array.isArray(parsed)) {
+    for (const item of parsed) {
+      const found = findStructuredReply(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  if (typeof parsed !== "object") return null;
+
+  const record = parsed as Record<string, unknown>;
+  const direct = structuredFromRecord(record);
+  if (direct) return direct;
+
+  for (const key of ["args", "content", "result", "data", "payload", "output"]) {
+    const found = findStructuredReply(record[key], depth + 1);
+    if (found) return found;
+  }
+
+  return null;
 }
 
 export function joinReplyText(prev: string, next: string): string {
@@ -111,29 +210,16 @@ export function joinReplyText(prev: string, next: string): string {
 }
 
 export function extractStructured(event: Record<string, unknown>): ReplyStructured | null {
-  const args =
-    (event.args as Record<string, unknown> | undefined) ||
-    ((event.content as Record<string, unknown> | undefined)?.args as
-      | Record<string, unknown>
-      | undefined);
+  const direct = findStructuredReply(event);
+  if (direct) return direct;
 
-  if (args && typeof args.english === "string") {
-    return {
-      original: typeof args.original === "string" ? args.original : "",
-      english: args.english,
-      language: typeof args.language === "string" ? args.language : "",
-    };
+  if (event.type === "tool_call" || event.type === "function_call") {
+    const toolArgs = parseMaybeJson(event.args ?? event.arguments);
+    return findStructuredReply(toolArgs);
   }
 
-  if (event.type === "tool_call" && typeof event.name === "string") {
-    const toolArgs = event.args as Record<string, unknown> | undefined;
-    if (toolArgs && typeof toolArgs.english === "string") {
-      return {
-        original: typeof toolArgs.original === "string" ? toolArgs.original : "",
-        english: toolArgs.english,
-        language: typeof toolArgs.language === "string" ? toolArgs.language : "",
-      };
-    }
+  if (event.type === "data" && typeof event.content === "string") {
+    return findStructuredReply(event.content);
   }
 
   return null;
@@ -203,6 +289,16 @@ export async function connectLiveSocket(session: LiveSessionInfo): Promise<WebSo
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(session.wss_url);
     ws.binaryType = "arraybuffer";
+    let settled = false;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      resolve(ws);
+    };
+
+    const fallbackTimer = setTimeout(finish, 1500);
 
     ws.onopen = () => {
       ws.send(
@@ -213,10 +309,31 @@ export async function connectLiveSocket(session: LiveSessionInfo): Promise<WebSo
           protocol_version: session.protocol_version ?? 2,
         })
       );
-      resolve(ws);
     };
 
-    ws.onerror = () => reject(new Error("Live WebSocket connection failed"));
+    ws.onmessage = (event) => {
+      if (settled || typeof event.data !== "string") return;
+      try {
+        const frame = JSON.parse(event.data) as { type?: string };
+        if (
+          frame.type === "auth_ok" ||
+          frame.type === "ready" ||
+          frame.type === "authenticated"
+        ) {
+          finish();
+        }
+      } catch {
+        // Ignore non-JSON frames during handshake.
+      }
+    };
+
+    ws.onerror = () => {
+      if (!settled) {
+        settled = true;
+        clearTimeout(fallbackTimer);
+        reject(new Error("Live WebSocket connection failed"));
+      }
+    };
   });
 }
 
