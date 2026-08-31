@@ -8,6 +8,17 @@ const TECHNICAL_MARKERS = [
   "a.run.app",
 ];
 
+export function isAgentUnavailableError(error: unknown): boolean {
+  const raw =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  const lower = raw.toLowerCase();
+  return lower.includes("404") || lower.includes("not found");
+}
+
 export function toUserFacingApiError(error: unknown, fallback: string): string {
   const raw =
     error instanceof Error

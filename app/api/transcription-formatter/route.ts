@@ -14,10 +14,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const result = await hikigai.invokeAgent("hikigai-transcription-agent", {
+    const result = await hikigai.invokeAgent("transcription-agent", {
       transcription: message,
     }, HIKIGAI_AGENT_TIMEOUT_MS);
-    console.log("[transcription-formatter] raw invoke output:", JSON.stringify(result));
+    console.log("[transcription-agent] raw invoke output:", JSON.stringify(result));
 
     const output = result.output as { transcription?: string; transcript?: unknown } | undefined;
     const formattedTranscription = output?.transcription || result.content || message;
@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
-    console.error("[transcription-formatter] Error:", errorMessage);
+    console.error("[transcription-agent] Error:", errorMessage);
     return NextResponse.json(
       { error: `Internal server error: ${errorMessage}` },
       { status: 500 }
