@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
@@ -21,6 +21,9 @@ import {
   ClipboardCheck,
   ThumbsUp,
   ThumbsDown,
+  Pencil,
+  Save,
+  Info,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -43,11 +46,19 @@ import {
   endVisit,
   setReportData,
   setReportLoading,
+  setReportSectionLoading,
+  updateVisitNote,
   setMedicalNotesFeedbackRating,
   setOrdersFeedbackRating,
   type ReportData,
 } from "@/store/slices/recordingSlice";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
+
+type VisitNotesEditState = {
+  isEditing: boolean;
+  hasChanges: boolean;
+};
 
 function SectionBodyLoader() {
   return (
@@ -259,10 +270,12 @@ function MedicalNotesTab({
   transcriptMessage,
   feedbackRating,
   onFeedbackRatingChange,
+  onVisitNotesEditStateChange,
 }: {
   transcriptMessage: string;
   feedbackRating: "up" | "down" | null;
   onFeedbackRatingChange: (rating: "up" | "down" | null) => void;
+  onVisitNotesEditStateChange?: (state: VisitNotesEditState) => void;
 }) {
   const dispatch = useAppDispatch();
   const reportData = useAppSelector((s) => s.recording.reportData);
@@ -275,11 +288,112 @@ function MedicalNotesTab({
   const [expandedSoap, setExpandedSoap] = useState<Record<string, boolean>>({});
   const [retryingSection, setRetryingSection] = useState<"visit" | "soap" | "icd" | "cpt" | "cpt2" | "em" | null>(null);
   const [retryErrors, setRetryErrors] = useState<Record<string, string>>({});
+  const [isEditingVisitNotes, setIsEditingVisitNotes] = useState(false);
+  const [editedVisitNotes, setEditedVisitNotes] = useState("");
+  const [hasVisitNotesChanged, setHasVisitNotesChanged] = useState(false);
+  const [isSavingVisitNotes, setIsSavingVisitNotes] = useState(false);
+
+  const visitNotesText = reportData?.visitNotes.join("\n").trim() ?? "";
+
+  useEffect(() => {
+    onVisitNotesEditStateChange?.({
+      isEditing: isEditingVisitNotes,
+      hasChanges: hasVisitNotesChanged,
+    });
+  }, [hasVisitNotesChanged, isEditingVisitNotes, onVisitNotesEditStateChange]);
+
+  useEffect(() => {
+    if (!isEditingVisitNotes) {
+      setHasVisitNotesChanged(false);
+      return;
+    }
+    setHasVisitNotesChanged(editedVisitNotes.trim() !== visitNotesText);
+  }, [editedVisitNotes, isEditingVisitNotes, visitNotesText]);
 
   if (!reportData) return null;
 
   const doctorName = `${user.firstName} ${user.lastName}`.trim();
   const medicalNotesFeedback = buildMedicalNotesFeedbackContent(reportData);
+
+  const handleEditVisitNotes = () => {
+    setEditedVisitNotes(visitNotesText);
+    setIsEditingVisitNotes(true);
+    setHasVisitNotesChanged(false);
+  };
+
+  const handleCancelEditVisitNotes = () => {
+    setIsEditingVisitNotes(false);
+    setEditedVisitNotes("");
+    setHasVisitNotesChanged(false);
+  };
+
+  const regenerateSoapNotes = async (message: string) => {
+    dispatch(setReportSectionLoading({ section: "soapNote", loading: true }));
+    try {
+      const response = await apiFetch("/api/soap-notes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      });
+
+      const data = (await response.json()) as {
+        subjective?: string;
+        objective?: string;
+        assessment?: string;
+        plan?: string;
+        error?: string;
+      };
+
+      const apiError = getApiError(response, data, "SOAP notes update failed");
+      if (apiError) {
+        throw new Error(apiError);
+      }
+
+      const subjective = data.subjective?.trim() || "";
+      const objective = data.objective?.trim() || "";
+      const assessment = data.assessment?.trim() || "";
+      const plan = data.plan?.trim() || "";
+
+      dispatch(
+        setReportData({
+          ...reportData,
+          soapNote: {
+            subjective: subjective ? { subjective } : {},
+            objective: objective ? { objective } : {},
+            assessment: assessment ? { assessment } : {},
+            plan: plan ? { plan } : {},
+          },
+        })
+      );
+    } finally {
+      dispatch(setReportSectionLoading({ section: "soapNote", loading: false }));
+    }
+  };
+
+  const handleSaveVisitNotes = async () => {
+    const nextVisitNotes = editedVisitNotes.trim();
+    if (!nextVisitNotes) {
+      toast.error("Visit notes cannot be empty.");
+      return;
+    }
+
+    setIsSavingVisitNotes(true);
+    try {
+      dispatch(updateVisitNote(nextVisitNotes));
+      setIsEditingVisitNotes(false);
+      setEditedVisitNotes("");
+      setHasVisitNotesChanged(false);
+      toast.success("Visit notes updated.");
+
+      await regenerateSoapNotes(nextVisitNotes);
+    } catch (error) {
+      toast.error(
+        toUserFacingApiError(error, "Failed to refresh SOAP notes from updated visit notes.")
+      );
+    } finally {
+      setIsSavingVisitNotes(false);
+    }
+  };
 
   const retryVisitNotes = async () => {
     if (!transcriptMessage) return;
@@ -549,9 +663,29 @@ function MedicalNotesTab({
         {/* Visit Summary */}
         <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)] flex flex-col max-h-[60vh] overflow-hidden">
           <div className="flex justify-between items-center mb-2">
-            <h3 className="font-medium text-lg text-black">Visit Summary</h3>
+            <div className="flex items-center gap-2">
+              <h3 className="font-medium text-lg text-black">Visit Summary</h3>
+              {isEditingVisitNotes && (
+                <span
+                  className="inline-flex"
+                  title="You are editing visit notes. Going back without saving will discard your changes."
+                >
+                  <Info className="h-4 w-4 text-slate-400" />
+                </span>
+              )}
+            </div>
             <div className="flex gap-2">
-              {!sectionLoading.visitNotes && isVisitSummaryMissing && (
+              {!isEditingVisitNotes && !!visitNotesText && (
+                <button
+                  type="button"
+                  onClick={handleEditVisitNotes}
+                  className="h-8 w-8 flex items-center justify-center rounded-md hover:bg-slate-100 transition-colors"
+                  title="Edit visit notes"
+                >
+                  <Pencil className="h-4 w-4 text-slate-400 hover:text-brand-blue" />
+                </button>
+              )}
+              {!sectionLoading.visitNotes && isVisitSummaryMissing && !isEditingVisitNotes && (
                 <RetryButton onClick={retryVisitNotes} isLoading={retryingSection === "visit"} />
               )}
             </div>
@@ -561,9 +695,41 @@ function MedicalNotesTab({
           )}
           {sectionLoading.visitNotes ? (
             <SectionBodyLoader />
+          ) : isEditingVisitNotes ? (
+            <div className="space-y-4 flex flex-col flex-1 min-h-0">
+              <textarea
+                className="w-full min-h-[300px] flex-1 p-4 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-blue/50 font-sans text-sm leading-relaxed resize-y"
+                value={editedVisitNotes}
+                onChange={(e) => setEditedVisitNotes(e.target.value)}
+                placeholder="Enter visit notes..."
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={handleCancelEditVisitNotes}
+                  disabled={isSavingVisitNotes}
+                  className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 rounded-lg hover:bg-slate-50 disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleSaveVisitNotes()}
+                  disabled={isSavingVisitNotes || !editedVisitNotes.trim()}
+                  className="px-4 py-2 text-sm bg-brand-blue hover:bg-brand-blue/90 text-white rounded-lg flex items-center gap-2 disabled:opacity-60"
+                >
+                  {isSavingVisitNotes ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Save className="h-4 w-4" />
+                  )}
+                  Save Changes
+                </button>
+              </div>
+            </div>
           ) : (
             <div className="text-justify whitespace-pre-line overflow-y-auto flex-1 min-h-0 pr-4 text-sm text-slate-700">
-              {reportData.visitNotes[0] || (
+              {visitNotesText || (
                 <p className="text-slate-400 italic">No visit summary available.</p>
               )}
             </div>
@@ -1688,13 +1854,26 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
   const medicalNotesFeedbackRating = useAppSelector((s) => s.recording.medicalNotesFeedbackRating);
   const ordersFeedbackRating = useAppSelector((s) => s.recording.ordersFeedbackRating);
   const tabCount = mriReport?.data?.studies?.length ? 4 : 3;
+  const [visitNotesEditState, setVisitNotesEditState] = useState<VisitNotesEditState>({
+    isEditing: false,
+    hasChanges: false,
+  });
+  const [showVisitNotesWarning, setShowVisitNotesWarning] = useState(false);
 
-  const handleBack = () => {
+  const navigateBackToRecording = () => {
     dispatch(setReportLoading(false));
     dispatch(setCurrentView("recording"));
     if (isVisitDetailsRoute) {
       router.push("/recording");
     }
+  };
+
+  const handleBack = () => {
+    if (visitNotesEditState.isEditing || visitNotesEditState.hasChanges) {
+      setShowVisitNotesWarning(true);
+      return;
+    }
+    navigateBackToRecording();
   };
 
   const handleEndVisit = async () => {
@@ -1849,6 +2028,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
                   transcriptMessage={transcriptMessage}
                   feedbackRating={medicalNotesFeedbackRating}
                   onFeedbackRatingChange={(r) => dispatch(setMedicalNotesFeedbackRating(r))}
+                  onVisitNotesEditStateChange={setVisitNotesEditState}
                 />
               </TabsContent>
               <TabsContent value="orders">
@@ -1871,6 +2051,39 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
         </main>
       )}
 
+      <Dialog open={showVisitNotesWarning} onOpenChange={setShowVisitNotesWarning}>
+        <DialogContent
+          className="p-6"
+          showClose={false}
+          hiddenTitle="Unsaved visit notes changes"
+          hiddenDescription="Discard unsaved visit notes changes and return to recording"
+        >
+          <h2 className="text-lg font-semibold text-slate-900">Unsaved Changes</h2>
+          <p className="mt-2 text-sm text-slate-600">
+            You are currently editing the visit notes. Going back to the recording page will
+            discard any changes you&apos;ve made. Are you sure you want to continue?
+          </p>
+          <div className="mt-6 flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setShowVisitNotesWarning(false)}
+              className="px-4 py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowVisitNotesWarning(false);
+                navigateBackToRecording();
+              }}
+              className="px-4 py-2 text-sm bg-brand-blue hover:bg-brand-blue/90 text-white rounded-lg"
+            >
+              Go Back
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

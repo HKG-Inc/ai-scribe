@@ -5,12 +5,21 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { toast } from "sonner";
 import { FileText, Eye, Paperclip, Loader2, X, Download } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
-import { appendMriReport, type MriReport } from "@/store/slices/recordingSlice";
+import { appendMriReport, clearMriReport, removeMriStudiesForFilename, type MriReport, type MriStudy } from "@/store/slices/recordingSlice";
 import MRISummaryModal from "@/components/recording/MRISummaryModal";
 import { apiFetch, displayMriFinding } from "@/lib/utils";
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
 const MAX_FILES = 6;
+
+function tagStudiesWithFilenames(studies: MriStudy[], filenames: string[]): MriStudy[] {
+  return studies.map((study, index) => ({
+    ...study,
+    filename:
+      study.filename?.trim() ||
+      (filenames.length === 1 ? filenames[0] : filenames[index] || filenames[0]),
+  }));
+}
 
 export default function UploadMRIButton() {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -51,7 +60,11 @@ export default function UploadMRIButton() {
         throw new Error("MRI clinical summary returned no studies");
       }
 
-      dispatch(appendMriReport({ data: { studies: result.data.studies } }));
+      const taggedStudies = tagStudiesWithFilenames(
+        result.data.studies,
+        files.map((file) => file.name)
+      );
+      dispatch(appendMriReport({ data: { studies: taggedStudies } }));
       toast.success("MRI clinical summary generated successfully!");
     } catch (error) {
       toast.error(
@@ -107,7 +120,18 @@ export default function UploadMRIButton() {
   };
 
   const handleRemoveFile = (index: number) => {
-    setMriFiles((prev) => prev.filter((_, i) => i !== index));
+    const file = mriFiles[index];
+    if (!file) return;
+
+    dispatch(removeMriStudiesForFilename(file.name));
+
+    const nextFiles = mriFiles.filter((_, i) => i !== index);
+    setMriFiles(nextFiles);
+
+    if (nextFiles.length === 0) {
+      dispatch(clearMriReport());
+    }
+
     toast.success("File removed");
   };
 

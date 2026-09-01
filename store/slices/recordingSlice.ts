@@ -425,6 +425,17 @@ const recordingSlice = createSlice({
         },
       };
     },
+    removeMriStudiesForFilename(state, action: PayloadAction<string>) {
+      const filename = action.payload;
+      if (!state.mriReport?.data?.studies?.length) return;
+
+      const remaining = state.mriReport.data.studies.filter(
+        (study) => study.filename !== filename
+      );
+
+      state.mriReport =
+        remaining.length > 0 ? { data: { studies: remaining } } : null;
+    },
     clearMriReport(state) {
       state.mriReport = null;
     },
@@ -457,7 +468,11 @@ const recordingSlice = createSlice({
     },
     updateVisitNote(state, action: PayloadAction<string>) {
       if (state.reportData) {
-        state.reportData.visitNotes[0] = action.payload;
+        if (state.reportData.visitNotes.length === 0) {
+          state.reportData.visitNotes = [action.payload];
+        } else {
+          state.reportData.visitNotes[0] = action.payload;
+        }
       }
     },
     setMedicalNotesFeedbackRating(state, action: PayloadAction<"up" | "down" | null>) {
@@ -506,6 +521,7 @@ export const {
   setCurrentResponseTranslated,
   setMriReport,
   appendMriReport,
+  removeMriStudiesForFilename,
   clearMriReport,
   resetQuestionnaireState,
   setPendingBufferCount,
