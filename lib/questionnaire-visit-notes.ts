@@ -87,6 +87,17 @@ export function buildQuestionnaireCombinedMessage(
   return header + qaBlock + transcriptionText.trim();
 }
 
+function flattenAgentRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const formatted = asRecord(record.formatted_output);
+  const finalOutput = asRecord(record.final_output);
+
+  return {
+    ...record,
+    ...(formatted ?? {}),
+    ...(finalOutput ?? {}),
+  };
+}
+
 export function extractAgentOutput(payload: unknown): Record<string, unknown> {
   const root = asRecord(payload);
   if (!root) return {};
@@ -97,13 +108,7 @@ export function extractAgentOutput(payload: unknown): Record<string, unknown> {
     asRecord(root.data) ||
     root;
 
-  // Some agents wrap again under formatted_output
-  const formatted = asRecord(nested.formatted_output);
-  if (formatted) {
-    return { ...nested, ...formatted };
-  }
-
-  return nested;
+  return flattenAgentRecord(nested);
 }
 
 function stripCcPrefix(text: string): string {
@@ -112,7 +117,7 @@ function stripCcPrefix(text: string): string {
 
 function stripTbiHeader(text: string): string {
   return text
-    .replace(/^B\) TBI \(Traumatic Brain Injury\):\n?/i, "")
+    .replace(/^B\)\s*TBI\s*(\(Traumatic Brain Injury\))?:\s*\n?/i, "")
     .trim();
 }
 
@@ -135,13 +140,17 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
   const msk =
     asString(outputs.msk.msk) || asString(outputs.msk.msk_section);
 
+  const tbiFields = flattenAgentRecord(outputs.tbi);
   let tbi =
-    asString(outputs.tbi.tbi) || asString(outputs.tbi.structured_section);
+    asString(tbiFields.tbi) ||
+    asString(tbiFields.structured_section) ||
+    asString(tbiFields.inline_summary);
   if (!tbi) {
     tbi =
-      asString(outputs.tbi.inline_summary) ||
-      asString(asRecord(outputs.tbi.formatted_output)?.structured_section) ||
-      asString(asRecord(outputs.tbi.formatted_output)?.inline_summary);
+      asString(asRecord(tbiFields.formatted_output)?.structured_section) ||
+      asString(asRecord(tbiFields.formatted_output)?.inline_summary) ||
+      asString(asRecord(tbiFields.final_output)?.structured_section) ||
+      asString(asRecord(tbiFields.final_output)?.inline_summary);
   }
   tbi = stripTbiHeader(tbi);
 
@@ -158,10 +167,10 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
       functionality,
     },
     tbi_symptom_reasoning: asObject(
-      outputs.tbi.tbi_symptom_reasoning ?? outputs.tbi.symptom_reasoning
+      tbiFields.tbi_symptom_reasoning ?? tbiFields.symptom_reasoning
     ),
     tbi_symptom_statuses: asObject(
-      outputs.tbi.tbi_symptom_statuses ?? outputs.tbi.symptom_statuses
+      tbiFields.tbi_symptom_statuses ?? tbiFields.symptom_statuses
     ),
   };
 }
