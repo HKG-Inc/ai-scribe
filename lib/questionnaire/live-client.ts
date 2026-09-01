@@ -225,9 +225,30 @@ export function extractStructured(event: Record<string, unknown>): ReplyStructur
   return null;
 }
 
+/** Whether a live WS frame should be treated as a questionnaire answer transcription. */
+export function shouldAcceptReplyEvent(event: Record<string, unknown>): boolean {
+  if (event.type === "tool_call" || event.type === "function_call") {
+    const name = event.name ?? event.tool;
+    return name === "emit_transcription";
+  }
+
+  if (
+    event.type === "data" &&
+    event.modality === "text" &&
+    event.partial !== true &&
+    typeof event.content === "string"
+  ) {
+    const source = event.source;
+    return source === "output" || source === "output_transcription" || !source;
+  }
+
+  return false;
+}
+
 export interface ParsedLiveEvent {
   binary?: ArrayBuffer;
   type?: string;
+  modality?: string;
   source?: string;
   content?: string;
   finished?: boolean;

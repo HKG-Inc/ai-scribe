@@ -8,6 +8,27 @@ import { PARENT_LANGUAGE, QUESTIONS, isNoSpeechResponse } from "@/lib/conversati
 import { PatientAnswerDisplay } from "@/components/recording/PatientAnswerDisplay";
 import type { RecordingMode } from "@/store/slices/recordingSlice";
 
+function DoctorQuestionDisplay({
+  questionEn,
+  questionTranslated,
+  showTranslation,
+}: {
+  questionEn: string;
+  questionTranslated?: string;
+  showTranslation: boolean;
+}) {
+  return (
+    <>
+      <div className="text-base font-semibold text-slate-800">{questionEn}</div>
+      {showTranslation && questionTranslated && (
+        <div className="text-base text-slate-500 italic" dir="auto">
+          {questionTranslated}
+        </div>
+      )}
+    </>
+  );
+}
+
 interface TranscriptionPanelProps {
   transcription: string[];
   liveDraft?: string;
@@ -45,6 +66,9 @@ export function TranscriptionPanel({
   const showQuestionnaire =
     recordingMode === "conversational" &&
     (questionnaireStarted || questionnaireCompleted || qaHistory.length > 0);
+
+  const showTranslatedQuestion =
+    !!selectedLanguage && selectedLanguage !== PARENT_LANGUAGE;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -89,12 +113,11 @@ export function TranscriptionPanel({
             {qaHistory.map((qa, idx) => (
               <div key={idx} className="space-y-3 pb-4 border-b border-slate-200">
                 <div className="text-sm font-semibold text-brand-green">Doctor</div>
-                <div className="text-base text-slate-700">{qa.questionEn}</div>
-                {qa.questionTranslated && selectedLanguage !== PARENT_LANGUAGE && (
-                  <div className="text-base text-slate-600 italic" dir="auto">
-                    {qa.questionTranslated}
-                  </div>
-                )}
+                <DoctorQuestionDisplay
+                  questionEn={qa.questionEn}
+                  questionTranslated={qa.questionTranslated}
+                  showTranslation={showTranslatedQuestion}
+                />
                 <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>
                 <PatientAnswerDisplay
                   original={qa.responseTranslated?.original_text}
@@ -111,20 +134,11 @@ export function TranscriptionPanel({
             {questionnaireStarted && !questionnaireCompleted && (
               <div className="space-y-3">
                 <div className="text-sm font-semibold text-brand-green">Doctor</div>
-                <div className="text-base text-slate-700">
-                  {QUESTIONS[currentQuestionIndex]?.text_en}
-                </div>
-                {selectedLanguage !== PARENT_LANGUAGE && (
-                  <>
-                    {currentQuestionTranslated ? (
-                      <div className="text-base text-slate-600 italic" dir="auto">
-                        {currentQuestionTranslated}
-                      </div>
-                    ) : questionnaireStatus.includes("Playing") ? (
-                      <div className="text-base text-slate-400 italic">Playing question...</div>
-                    ) : null}
-                  </>
-                )}
+                <DoctorQuestionDisplay
+                  questionEn={QUESTIONS[currentQuestionIndex]?.text_en ?? ""}
+                  questionTranslated={currentQuestionTranslated}
+                  showTranslation={showTranslatedQuestion}
+                />
                 {currentQuestionResponse && (
                   <>
                     <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>

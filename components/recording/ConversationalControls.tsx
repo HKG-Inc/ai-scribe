@@ -87,7 +87,9 @@ export function ConversationalControls({
 
     dispatch(setQuestionnaireStatus("Playing question..."));
     try {
-      const { translatedText } = await playQuestion(index, language);
+      const { translatedText } = await playQuestion(index, language, {
+        onTranslatedText: (text) => dispatch(setCurrentQuestionTranslated(text)),
+      });
       dispatch(
         setCurrentQuestionTranslated(
           translatedText || (language === PARENT_LANGUAGE ? question.text_en : "")

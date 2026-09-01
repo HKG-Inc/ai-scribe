@@ -32,6 +32,7 @@ import {
   resamplePcm16,
   sendPcm,
   sendText,
+  shouldAcceptReplyEvent,
   sleep,
   startTurn,
   TARGET_PCM_SAMPLE_RATE,
@@ -54,14 +55,6 @@ async function fetchCannedQuestion(
   const params = new URLSearchParams({ language, question_id: questionId });
   const response = await apiFetch(`/api/questionnaire/canned?${params.toString()}`);
   return (await response.json()) as CannedQuestionResponse;
-}
-
-function isEmitTranscriptionEvent(parsed: Record<string, unknown>): boolean {
-  if (parsed.type !== "tool_call" && parsed.type !== "function_call") {
-    return false;
-  }
-  const name = parsed.name ?? parsed.tool;
-  return name === "emit_transcription";
 }
 
 async function playWavUrl(wavUrl: string, signal: AbortSignal): Promise<void> {
@@ -198,7 +191,7 @@ export function useQuestionnaireFlow() {
       }
 
       const found = extractStructured(parsed);
-      if (found && isEmitTranscriptionEvent(parsed)) {
+      if (found && shouldAcceptReplyEvent(parsed)) {
         rememberReplySegment(found);
       }
     },
@@ -306,7 +299,12 @@ export function useQuestionnaireFlow() {
   }, []);
 
   const playViaAgent = useCallback(
-    async (question: Question, language: string, signal: AbortSignal) => {
+    async (
+      question: Question,
+      language: string,
+      signal: AbortSignal,
+      onTranslatedText?: (text: string) => void
+    ): Promise<string> => {
       await ensurePlayer();
       playerNodeRef.current?.port.postMessage({ command: "reset" });
 
@@ -316,6 +314,7 @@ export function useQuestionnaireFlow() {
       );
 
       const ws = await ensureAudioLive(QUESTIONNAIRE_PLAY_AGENT);
+      let translatedText = language === PARENT_LANGUAGE ? question.text_en : "";
 
       await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => resolve(), 25000);
@@ -337,6 +336,24 @@ export function useQuestionnaireFlow() {
             if (parsed.binary && playerNodeRef.current) {
               playerNodeRef.current.port.postMessage(parsed.binary, [parsed.binary]);
               return;
+            }
+
+            if (
+              parsed.type === "data" &&
+              parsed.modality === "text" &&
+              parsed.partial !== true &&
+              typeof parsed.content === "string"
+            ) {
+              const text = parsed.content.trim();
+              const source = parsed.source || "";
+              if (
+                text &&
+                source !== "input_transcription" &&
+                (source === "output" || source === "output_transcription" || !source)
+              ) {
+                translatedText = text;
+                onTranslatedText?.(text);
+              }
             }
 
             if (
@@ -366,6 +383,8 @@ export function useQuestionnaireFlow() {
           { once: true }
         );
       });
+
+      return translatedText;
     },
     [ensureAudioLive, ensurePlayer]
   );
@@ -373,7 +392,8 @@ export function useQuestionnaireFlow() {
   const playQuestion = useCallback(
     async (
       questionIndex: number,
-      language: string
+      language: string,
+      options?: { onTranslatedText?: (text: string) => void }
     ): Promise<{ translatedText: string; usedCanned: boolean }> => {
       const question = QUESTIONS[questionIndex];
       if (!question) {
@@ -388,17 +408,25 @@ export function useQuestionnaireFlow() {
 
       let translatedText = "";
       let usedCanned = false;
+      const notifyTranslation = (text: string) => {
+        if (!text.trim()) return;
+        translatedText = text;
+        options?.onTranslatedText?.(text);
+      };
 
       try {
         const canned = await fetchCannedQuestion(language, question.id);
         if (canned.available && canned.text && canned.wav_url) {
-          translatedText = canned.text;
+          notifyTranslation(canned.text);
           usedCanned = true;
           await playWavUrl(canned.wav_url, controller.signal);
         } else {
-          await playViaAgent(question, language, controller.signal);
-          translatedText =
-            language === PARENT_LANGUAGE ? question.text_en : "";
+          translatedText = await playViaAgent(
+            question,
+            language,
+            controller.signal,
+            notifyTranslation
+          );
         }
       } finally {
         playAbortRef.current = null;
