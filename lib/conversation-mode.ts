@@ -167,6 +167,12 @@ export const QUESTIONS: Question[] = [
     text_en: "And finally, have you had any previous injury like this in the past?",
     category: "medical_history",
   },
+  {
+    id: "q25",
+    text_en:
+      "Were you ever treated at a hospital for this accident, were you ever treated at a previous facility like a hospital or an urgent care or a primary care physician's facility?",
+    category: "medical_history",
+  },
 ];
 
 export function languageLabel(code: string): string {
