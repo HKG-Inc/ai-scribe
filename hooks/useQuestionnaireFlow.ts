@@ -39,61 +39,7 @@ import {
   type LiveSessionInfo,
   type ReplyStructured,
 } from "@/lib/questionnaire/live-client";
-import { apiFetch, withBasePath } from "@/lib/utils";
-
-interface CannedQuestionResponse {
-  available: boolean;
-  text?: string;
-  original_text?: string;
-  wav_url?: string;
-}
-
-async function fetchCannedQuestion(
-  language: string,
-  questionId: string
-): Promise<CannedQuestionResponse> {
-  const params = new URLSearchParams({ language, question_id: questionId });
-  const response = await apiFetch(`/api/questionnaire/canned?${params.toString()}`);
-  return (await response.json()) as CannedQuestionResponse;
-}
-
-async function playWavUrl(wavUrl: string, signal: AbortSignal): Promise<void> {
-  const proxyUrl = withBasePath(
-    `/api/questionnaire/proxy-audio?url=${encodeURIComponent(wavUrl)}`
-  );
-  const response = await fetch(proxyUrl, { signal });
-  if (!response.ok) {
-    throw new Error("Failed to load canned question audio");
-  }
-  const buffer = await response.arrayBuffer();
-  const audioContext = new AudioContext();
-  try {
-    const audioBuffer = await audioContext.decodeAudioData(buffer.slice(0));
-    await audioContext.resume();
-    await new Promise<void>((resolve, reject) => {
-      if (signal.aborted) {
-        reject(new DOMException("Aborted", "AbortError"));
-        return;
-      }
-      const source = audioContext.createBufferSource();
-      source.buffer = audioBuffer;
-      source.connect(audioContext.destination);
-      source.onended = () => resolve();
-      const onAbort = () => {
-        try {
-          source.stop();
-        } catch {
-          // ignore
-        }
-        reject(new DOMException("Aborted", "AbortError"));
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      source.start(0);
-    });
-  } finally {
-    await audioContext.close();
-  }
-}
+import { withBasePath } from "@/lib/utils";
 
 export function useQuestionnaireFlow() {
   const playAbortRef = useRef<AbortController | null>(null);
@@ -394,7 +340,7 @@ export function useQuestionnaireFlow() {
       questionIndex: number,
       language: string,
       options?: { onTranslatedText?: (text: string) => void }
-    ): Promise<{ translatedText: string; usedCanned: boolean }> => {
+    ): Promise<{ translatedText: string }> => {
       const question = QUESTIONS[questionIndex];
       if (!question) {
         throw new Error("Question not found");
@@ -407,7 +353,6 @@ export function useQuestionnaireFlow() {
       playAbortRef.current = controller;
 
       let translatedText = "";
-      let usedCanned = false;
       const notifyTranslation = (text: string) => {
         if (!text.trim()) return;
         translatedText = text;
@@ -415,25 +360,18 @@ export function useQuestionnaireFlow() {
       };
 
       try {
-        const canned = await fetchCannedQuestion(language, question.id);
-        if (canned.available && canned.text && canned.wav_url) {
-          notifyTranslation(canned.text);
-          usedCanned = true;
-          await playWavUrl(canned.wav_url, controller.signal);
-        } else {
-          translatedText = await playViaAgent(
-            question,
-            language,
-            controller.signal,
-            notifyTranslation
-          );
-        }
+        translatedText = await playViaAgent(
+          question,
+          language,
+          controller.signal,
+          notifyTranslation
+        );
       } finally {
         playAbortRef.current = null;
         setReplyInputBlocked(false);
       }
 
-      return { translatedText, usedCanned };
+      return { translatedText };
     },
     [cancelPlay, playViaAgent, setReplyInputBlocked]
   );

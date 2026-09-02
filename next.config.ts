@@ -44,7 +44,7 @@ const nextConfig: NextConfig = {
       ]),
     ];
   },
-  serverExternalPackages: ["mupdf", "@google-cloud/storage"],
+  serverExternalPackages: ["mupdf"],
   images: {
     remotePatterns: [
       {

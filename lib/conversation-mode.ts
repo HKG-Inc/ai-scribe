@@ -1,6 +1,6 @@
 /**
  * Conversational questionnaire constants.
- * Play/record use GCS canned assets or Hikigai questionnaire agents (see hooks/useQuestionnaireFlow).
+ * Play/record use Hikigai questionnaire agents (see hooks/useQuestionnaireFlow).
  */
 
 export const PARENT_LANGUAGE = "en-US";

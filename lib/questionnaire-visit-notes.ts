@@ -175,22 +175,29 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
   };
 }
 
+export const QUESTIONNAIRE_VISIT_NOTE_SECTION_LABELS = [
+  "A) Chief Complaint",
+  "B) MSK",
+  "C) TBI",
+  "D) Medical",
+  "E) Functionality",
+] as const;
+
+const QUESTIONNAIRE_VISIT_NOTE_SECTION_KEYS: Array<
+  keyof QuestionnaireVisitNotesSections
+> = ["chief_complaint", "msk", "tbi", "medical", "functionality"];
+
+const EMPTY_SECTION_PLACEHOLDER = "Not discussed";
+
 /** Flatten structured sections into one display string for the report UI. */
 export function formatQuestionnaireVisitNotesText(
   sections: QuestionnaireVisitNotesSections
 ): string {
-  const blocks: Array<[string, string]> = [
-    ["Chief Complaint", sections.chief_complaint],
-    ["MSK", sections.msk],
-    ["TBI", sections.tbi],
-    ["Medical", sections.medical],
-    ["Functionality", sections.functionality],
-  ];
-
-  return blocks
-    .filter(([, text]) => text.trim().length > 0)
-    .map(([label, text]) => `${label}\n${text.trim()}`)
-    .join("\n\n");
+  return QUESTIONNAIRE_VISIT_NOTE_SECTION_LABELS.map((label, index) => {
+    const key = QUESTIONNAIRE_VISIT_NOTE_SECTION_KEYS[index];
+    const text = sections[key].trim() || EMPTY_SECTION_PLACEHOLDER;
+    return `${label}\n${text}`;
+  }).join("\n\n");
 }
 
 function isVisitNotesSections(value: unknown): value is QuestionnaireVisitNotesSections {

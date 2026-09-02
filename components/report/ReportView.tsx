@@ -41,9 +41,11 @@ import { isNoSpeechResponse } from "@/lib/conversation-mode";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
 import { toUserFacingApiError } from "@/lib/api-errors";
+import { fetchOrdersPatchFromMessage } from "@/lib/regenerate-orders-from-message";
 import {
   setCurrentView,
   endVisit,
+  patchReportData,
   setReportData,
   setReportLoading,
   setReportSectionLoading,
@@ -355,8 +357,7 @@ function MedicalNotesTab({
       const plan = data.plan?.trim() || "";
 
       dispatch(
-        setReportData({
-          ...reportData,
+        patchReportData({
           soapNote: {
             subjective: subjective ? { subjective } : {},
             objective: objective ? { objective } : {},
@@ -367,6 +368,30 @@ function MedicalNotesTab({
       );
     } finally {
       dispatch(setReportSectionLoading({ section: "soapNote", loading: false }));
+    }
+  };
+
+  const regenerateOrdersFromMessage = async (message: string) => {
+    const orderSections = [
+      "medication",
+      "labtest",
+      "followup",
+      "procedure",
+      "referrals",
+      "vaccine",
+    ] as const;
+
+    for (const section of orderSections) {
+      dispatch(setReportSectionLoading({ section, loading: true }));
+    }
+
+    try {
+      const ordersPatch = await fetchOrdersPatchFromMessage(message);
+      dispatch(patchReportData(ordersPatch));
+    } finally {
+      for (const section of orderSections) {
+        dispatch(setReportSectionLoading({ section, loading: false }));
+      }
     }
   };
 
@@ -383,12 +408,19 @@ function MedicalNotesTab({
       setIsEditingVisitNotes(false);
       setEditedVisitNotes("");
       setHasVisitNotesChanged(false);
-      toast.success("Visit notes updated.");
 
-      await regenerateSoapNotes(nextVisitNotes);
+      await Promise.all([
+        regenerateSoapNotes(nextVisitNotes),
+        regenerateOrdersFromMessage(nextVisitNotes),
+      ]);
+
+      toast.success("Visit notes updated.");
     } catch (error) {
       toast.error(
-        toUserFacingApiError(error, "Failed to refresh SOAP notes from updated visit notes.")
+        toUserFacingApiError(
+          error,
+          "Failed to refresh report sections from updated visit notes."
+        )
       );
     } finally {
       setIsSavingVisitNotes(false);
