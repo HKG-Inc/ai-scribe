@@ -174,7 +174,7 @@ export class HikigaiClient {
 
 		let response = await post(token);
 
-		// If the token expired, refresh once and retry.
+		// Session token expired — refresh once and retry.
 		if (response.status === 401) {
 			token = await this.getAuthToken(true, timeoutMs);
 			response = await post(token);

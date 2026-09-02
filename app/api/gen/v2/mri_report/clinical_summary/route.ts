@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import {
   generateMriClinicalSummary,
-  MRI_MAX_TOTAL_BYTES,
   type MriInputFile,
 } from "@/lib/mri-clinical-summary";
+import { MRI_MAX_TOTAL_BYTES } from "@/lib/mri-clinical-summary-format";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -37,14 +37,18 @@ async function parseMultipartFiles(
   }
 
   const entries = formData.getAll("mri_files");
-  const files: MriInputFile[] = [];
+  const parsedEntries = await Promise.all(
+    entries.map(async (entry) => {
+      if (!(entry instanceof File) || entry.size === 0) return null;
+      const bytes = Buffer.from(await entry.arrayBuffer());
+      if (!bytes.length) return null;
+      return { filename: entry.name || "upload.pdf", bytes };
+    })
+  );
 
-  for (const entry of entries) {
-    if (!(entry instanceof File) || entry.size === 0) continue;
-    const bytes = Buffer.from(await entry.arrayBuffer());
-    if (!bytes.length) continue;
-    files.push({ filename: entry.name || "upload.pdf", bytes });
-  }
+  const files: MriInputFile[] = parsedEntries.filter(
+    (item): item is MriInputFile => item !== null
+  );
 
   return files;
 }

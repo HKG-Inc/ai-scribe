@@ -8,8 +8,9 @@ import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import { appendMriReport, clearMriReport, removeMriStudiesForFilename, type MriReport, type MriStudy } from "@/store/slices/recordingSlice";
 import MRISummaryModal from "@/components/recording/MRISummaryModal";
 import { apiFetch, displayMriFinding } from "@/lib/utils";
+import { MRI_MAX_TOTAL_BYTES } from "@/lib/mri-clinical-summary-format";
 
-const MAX_FILE_SIZE = 20 * 1024 * 1024;
+const MAX_FILE_SIZE = MRI_MAX_TOTAL_BYTES;
 const MAX_FILES = 6;
 
 function tagStudiesWithFilenames(studies: MriStudy[], filenames: string[]): MriStudy[] {
@@ -35,6 +36,11 @@ export default function UploadMRIButton() {
   const generateMRIClinicalSummary = async (files: File[]) => {
     setIsGeneratingReport(true);
     try {
+      const totalBytes = [...mriFiles, ...files].reduce((sum, file) => sum + file.size, 0);
+      if (totalBytes > MAX_FILE_SIZE) {
+        throw new Error("Total upload size exceeds 16 MB limit");
+      }
+
       const formData = new FormData();
       for (const file of files) {
         formData.append("mri_files", file, file.name);
@@ -93,7 +99,7 @@ export default function UploadMRIButton() {
 
     files.forEach((file) => {
       if (file.size > MAX_FILE_SIZE) {
-        invalidFiles.push(`${file.name} (exceeds 20MB)`);
+        invalidFiles.push(`${file.name} (exceeds 16MB)`);
       } else if (existingFilenames.includes(file.name)) {
         duplicateFiles.push(file.name);
       } else {
@@ -102,16 +108,17 @@ export default function UploadMRIButton() {
     });
 
     if (invalidFiles.length > 0) {
-      toast.error(`The following files exceed 20MB limit:\n${invalidFiles.join("\n")}`);
+      toast.error(`The following files exceed 16MB limit:\n${invalidFiles.join("\n")}`);
     }
     if (duplicateFiles.length > 0) {
       toast.error(`The following files are already uploaded:\n${duplicateFiles.join("\n")}`);
     }
 
     if (validFiles.length > 0) {
+      const summaryPromise = generateMRIClinicalSummary(validFiles);
       setMriFiles((prev) => [...prev, ...validFiles]);
       toast.success(`${validFiles.length} file(s) uploaded successfully`);
-      await generateMRIClinicalSummary(validFiles);
+      await summaryPromise;
     }
 
     if (fileInputRef.current) {
