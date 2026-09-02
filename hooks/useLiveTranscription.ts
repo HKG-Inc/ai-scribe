@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
-import { apiFetch, withBasePath } from "@/lib/utils";
+import { apiFetch } from "@/lib/utils";
+import { getPcmRecorderWorkletUrl } from "@/lib/questionnaire/live-client";
 
 const INPUT_AUDIO_RATE = 16000;
 const KEEPALIVE_MS = 4000;
@@ -42,10 +43,7 @@ function silentPcmBytes(ms = SILENT_PCM_MS) {
 }
 
 function getWorkletUrl() {
-  if (typeof window === "undefined") {
-    return "/pcm-recorder-processor.js";
-  }
-  return `${window.location.origin}${withBasePath("/pcm-recorder-processor.js")}`;
+  return getPcmRecorderWorkletUrl();
 }
 
 /** Same as live_transcriber.html */

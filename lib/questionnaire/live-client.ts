@@ -2,7 +2,9 @@ import {
   EDGE_SILENCE_CHUNKS,
   KEEP_SILENCE_CHUNKS,
   PCM_CHUNK_SAMPLES,
+  PCM_SEND_GAP_MS,
 } from "@/lib/questionnaire/constants";
+import { withBasePath } from "@/lib/utils";
 
 export const TARGET_PCM_SAMPLE_RATE = 16000;
 
@@ -385,6 +387,44 @@ export function sendText(ws: WebSocket, text: string): void {
 
 export function sendPcm(ws: WebSocket, chunk: Int16Array): void {
   ws.send(chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength));
+}
+
+export function getPcmRecorderWorkletUrl(): string {
+  if (typeof window === "undefined") {
+    return "/pcm-recorder-processor.js";
+  }
+  return `${window.location.origin}${withBasePath("/pcm-recorder-processor.js")}`;
+}
+
+export function getPcmPlayerWorkletUrl(): string {
+  if (typeof window === "undefined") {
+    return "/pcm-player-processor.js";
+  }
+  return `${window.location.origin}${withBasePath("/pcm-player-processor.js")}`;
+}
+
+export function silentPcmChunk(samples = PCM_CHUNK_SAMPLES): Int16Array {
+  return new Int16Array(samples);
+}
+
+/** Replay buffered PCM to the live agent in real-time sized chunks. */
+export async function sendRecordedPcmStream(
+  ws: WebSocket,
+  pcm: Int16Array,
+  gapMs = PCM_SEND_GAP_MS
+): Promise<void> {
+  if (!pcm.length) return;
+
+  const chunks = splitIntoSendChunks(pcm);
+  for (let i = 0; i < chunks.length; i++) {
+    if (!isSocketOpen(ws)) {
+      throw new Error("Live session closed before recorded audio finished sending");
+    }
+    sendPcm(ws, chunks[i]);
+    if (gapMs > 0 && i < chunks.length - 1) {
+      await sleep(gapMs);
+    }
+  }
 }
 
 export function endTurn(ws: WebSocket): void {

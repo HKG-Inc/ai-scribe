@@ -158,9 +158,9 @@ export function ConversationalControls({
     isBusyRef.current = true;
     setIsQuestionnaireStarting(true);
     try {
-      await startQuestionnaireReplySession();
       dispatch(startQuestionnaire());
       await playCurrentQuestion(0, selectedLanguage);
+      await startQuestionnaireReplySession();
     } catch (error) {
       stopQuestionnaireReplySession();
       const message =
