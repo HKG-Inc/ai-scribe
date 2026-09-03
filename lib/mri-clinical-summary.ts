@@ -34,64 +34,47 @@ export {
 } from "@/lib/mri-clinical-summary-format";
 
 export const MRI_AGENT_TIMEOUT_MS = 180_000;
-export const MRI_OCR_BATCH_SIZE = 5;
-export const MRI_OCR_PARALLEL_BATCHES = 2;
 
 export interface MriInputFile {
   filename: string;
   bytes: Buffer;
 }
 
-interface OcrBatchSpec {
+interface OcrPageResult {
   startPage: number;
-  endPage: number;
+  extractedText: string;
 }
 
-async function runWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  fn: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  if (items.length === 0) return [];
-
-  const results = new Array<R>(items.length);
-  let nextIndex = 0;
-
-  async function worker(): Promise<void> {
-    while (nextIndex < items.length) {
-      const current = nextIndex;
-      nextIndex += 1;
-      results[current] = await fn(items[current], current);
-    }
-  }
-
-  const workers = Array.from(
-    { length: Math.min(concurrency, items.length) },
-    () => worker()
-  );
-  await Promise.all(workers);
-  return results;
+function ms(startedAt: number): number {
+  return Math.round(performance.now() - startedAt);
 }
 
-async function invokeOcrBatch(
+/** One JPEG + real page number per OCR invoke (reduces latency vs multi-image batches). */
+async function invokeOcrPage(
   filename: string,
-  batch: OcrBatchSpec,
-  jpegs: Buffer[]
-): Promise<string> {
-  const attachments: AgentAttachment[] = jpegs.map((jpeg) => ({
-    data_base64: jpeg.toString("base64"),
-    mime_type: "image/jpeg",
-  }));
+  pageNumber: number,
+  jpeg: Buffer
+): Promise<OcrPageResult> {
+  const attachments: AgentAttachment[] = [
+    {
+      data_base64: jpeg.toString("base64"),
+      mime_type: "image/jpeg",
+    },
+  ];
 
+  const startedAt = performance.now();
   const raw = await hikigai.invokeAgent(
     MRI_OCR_AGENT,
     {
       filename,
-      start_page: batch.startPage,
-      end_page: batch.endPage,
+      start_page: pageNumber,
+      end_page: pageNumber,
     },
     MRI_AGENT_TIMEOUT_MS,
     attachments
+  );
+  console.log(
+    `[mri-report-ocr-agent] ${filename} page ${pageNumber} took ${ms(startedAt)}ms`
   );
 
   const output = extractMriAgentOutput(raw);
@@ -100,26 +83,17 @@ async function invokeOcrBatch(
 
   if (!extracted) {
     throw new Error(
-      `OCR agent returned no text for ${filename} pages ${batch.startPage}-${batch.endPage}`
+      `OCR agent returned no text for ${filename} page ${pageNumber}`
     );
   }
 
-  return extracted;
-}
-
-function buildOcrBatchSpecs(pageCount: number): OcrBatchSpec[] {
-  const batches: OcrBatchSpec[] = [];
-  for (let i = 0; i < pageCount; i += MRI_OCR_BATCH_SIZE) {
-    const startPage = i + 1;
-    const endPage = Math.min(i + MRI_OCR_BATCH_SIZE, pageCount);
-    batches.push({ startPage, endPage });
-  }
-  return batches;
+  return { startPage: pageNumber, extractedText: extracted };
 }
 
 /**
- * Render + OCR in batch-sized chunks so JPEG work overlaps agent calls
- * instead of rendering every page before the first OCR invoke.
+ * Per-page OCR invokes in parallel (one JPEG each), then stitch in page order.
+ * Keeps === PAGE N === headers from the agent; does not rename them to REPORT.
+ * JPEGs are rendered sequentially (MuPDF doc is not concurrency-safe); OCR calls run in parallel.
  */
 async function ocrScannedDoc(
   filename: string,
@@ -130,17 +104,31 @@ async function ocrScannedDoc(
     throw new Error(`PDF has no pages: ${filename}`);
   }
 
-  const batchSpecs = buildOcrBatchSpecs(pageCount);
-  const batchTexts = await runWithConcurrency(
-    batchSpecs,
-    MRI_OCR_PARALLEL_BATCHES,
-    async (spec) => {
-      const jpegs = renderPageRangeJpeg(doc, spec.startPage - 1, spec.endPage);
-      return invokeOcrBatch(filename, spec, jpegs);
-    }
+  const renderStartedAt = performance.now();
+  const pages: Array<{ pageNumber: number; jpeg: Buffer }> = [];
+  for (let pageNumber = 1; pageNumber <= pageCount; pageNumber++) {
+    const [jpeg] = renderPageRangeJpeg(doc, pageNumber - 1, pageNumber);
+    pages.push({ pageNumber, jpeg });
+  }
+  console.log(
+    `[mri-ocr] ${filename} rendered ${pageCount} JPEG(s) in ${ms(renderStartedAt)}ms`
   );
 
-  return batchTexts.join("\n\n").trim();
+  const ocrStartedAt = performance.now();
+  const pageResults = await Promise.all(
+    pages.map(({ pageNumber, jpeg }) =>
+      invokeOcrPage(filename, pageNumber, jpeg)
+    )
+  );
+  console.log(
+    `[mri-ocr] ${filename} parallel OCR wall time ${ms(ocrStartedAt)}ms (${pageCount} page invokes)`
+  );
+
+  return pageResults
+    .sort((a, b) => a.startPage - b.startPage)
+    .map((page) => page.extractedText.trim())
+    .join("\n\n")
+    .trim();
 }
 
 /**
@@ -173,15 +161,21 @@ export async function extractFileText(file: MriInputFile): Promise<string> {
 export async function generateMriClinicalSummary(
   files: MriInputFile[]
 ): Promise<MriClinicalSummaryData> {
+  const pipelineStartedAt = performance.now();
+
   // Exchange API key for session token while MuPDF work runs (hidden latency).
   const authReady = hikigai.ensureAuthToken(false, MRI_AGENT_TIMEOUT_MS);
 
+  const extractStartedAt = performance.now();
   const extractedResults = await Promise.all(
     files.map(async (file) => {
       const text = await extractFileText(file);
       if (!text) return null;
       return { filename: file.filename, text };
     })
+  );
+  console.log(
+    `[mri-pipeline] text extraction (incl. OCR) took ${ms(extractStartedAt)}ms`
   );
 
   await authReady;
@@ -197,14 +191,14 @@ export async function generateMriClinicalSummary(
 
   const message = buildSummaryMessage(combinedText);
 
+  const summaryStartedAt = performance.now();
   const raw = await hikigai.invokeAgent(
     MRI_SUMMARY_AGENT,
     { message },
     MRI_AGENT_TIMEOUT_MS
   );
-
   console.log(
-    "[mri-clinical-summary-agent]",
+    `[mri-clinical-summary-agent] took ${ms(summaryStartedAt)}ms`,
     describeMriAgentEnvelope(raw)
   );
 
@@ -219,6 +213,10 @@ export async function generateMriClinicalSummary(
       `Summary agent returned no studies (${describeMriAgentEnvelope(raw)})`
     );
   }
+
+  console.log(
+    `[mri-pipeline] total wall time ${ms(pipelineStartedAt)}ms`
+  );
 
   return data;
 }
