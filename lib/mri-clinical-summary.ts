@@ -205,7 +205,18 @@ export async function generateMriClinicalSummary(
   const data = parseSummaryOutput(raw);
 
   if (!data.studies.length) {
-    throw new Error("Summary agent returned no studies");
+    const root =
+      raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    const topKeys = root ? Object.keys(root).join(",") : typeof raw;
+    const responseKeys =
+      root?.response && typeof root.response === "object"
+        ? Object.keys(root.response as object).join(",")
+        : "";
+    throw new Error(
+      `Summary agent returned no studies (keys=${topKeys}` +
+        (responseKeys ? ` response.keys=${responseKeys}` : "") +
+        ")"
+    );
   }
 
   return data;
