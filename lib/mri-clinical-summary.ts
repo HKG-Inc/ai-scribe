@@ -152,11 +152,53 @@ export async function extractFileText(file: MriInputFile): Promise<string> {
 }
 
 /**
+ * Summarize one extracted MRI report. Filename is stamped on every study so
+ * multi-file uploads stay attributable when the agent omits filename.
+ */
+async function summarizeExtractedReport(file: {
+  filename: string;
+  text: string;
+}): Promise<MriClinicalSummaryData> {
+  const reportText = stitchReportTexts([file]);
+  const message = buildSummaryMessage(reportText);
+
+  const summaryStartedAt = performance.now();
+  const raw = await hikigai.invokeAgent(
+    MRI_SUMMARY_AGENT,
+    { message },
+    MRI_AGENT_TIMEOUT_MS
+  );
+  console.log(
+    `[mri-clinical-summary-agent] ${file.filename} took ${ms(summaryStartedAt)}ms`,
+    describeMriAgentEnvelope(raw)
+  );
+
+  const data = parseSummaryOutput(raw);
+  if (!data.studies.length) {
+    console.warn(
+      `[mri-clinical-summary-agent] no studies parsed for ${file.filename}:`,
+      describeMriAgentEnvelope(raw)
+    );
+    throw new Error(
+      `Summary agent returned no studies for ${file.filename} (${describeMriAgentEnvelope(raw)})`
+    );
+  }
+
+  return {
+    patient_label: data.patient_label,
+    studies: data.studies.map((study) => ({
+      ...study,
+      filename: study.filename?.trim() || file.filename,
+    })),
+  };
+}
+
+/**
  * Full pipeline:
  * 1. extract text per file (MuPDF or OCR) — files in parallel
- * 2. stitch === REPORT n === / FILENAME:
- * 3. send that combined PDF text to mri-clinical-summary-agent
- * 4. return { patient_label, studies }
+ * 2. summarize each file independently (avoids the agent dropping regions
+ *    when multiple reports are stitched into one prompt)
+ * 3. merge { patient_label, studies } across files
  */
 export async function generateMriClinicalSummary(
   files: MriInputFile[]
@@ -184,39 +226,30 @@ export async function generateMriClinicalSummary(
     (item): item is { filename: string; text: string } => item !== null
   );
 
-  const combinedText = stitchReportTexts(extracted);
-  if (!combinedText) {
+  if (!extracted.length) {
     throw new Error("No extractable text from uploaded MRI files");
   }
 
-  const message = buildSummaryMessage(combinedText);
-
   const summaryStartedAt = performance.now();
-  const raw = await hikigai.invokeAgent(
-    MRI_SUMMARY_AGENT,
-    { message },
-    MRI_AGENT_TIMEOUT_MS
+  const summaries = await Promise.all(
+    extracted.map((file) => summarizeExtractedReport(file))
   );
   console.log(
-    `[mri-clinical-summary-agent] took ${ms(summaryStartedAt)}ms`,
-    describeMriAgentEnvelope(raw)
+    `[mri-pipeline] ${summaries.length} summary agent call(s) took ${ms(summaryStartedAt)}ms`
   );
 
-  const data = parseSummaryOutput(raw);
-
-  if (!data.studies.length) {
-    console.warn(
-      "[mri-clinical-summary-agent] no studies parsed:",
-      describeMriAgentEnvelope(raw)
-    );
-    throw new Error(
-      `Summary agent returned no studies (${describeMriAgentEnvelope(raw)})`
-    );
+  const studies = summaries.flatMap((summary) => summary.studies);
+  if (!studies.length) {
+    throw new Error("Summary agent returned no studies");
   }
 
+  const patient_label =
+    summaries.find((summary) => summary.patient_label.trim())?.patient_label ||
+    "PATIENT 1";
+
   console.log(
-    `[mri-pipeline] total wall time ${ms(pipelineStartedAt)}ms`
+    `[mri-pipeline] total wall time ${ms(pipelineStartedAt)}ms (${studies.length} study/studies)`
   );
 
-  return data;
+  return { patient_label, studies };
 }

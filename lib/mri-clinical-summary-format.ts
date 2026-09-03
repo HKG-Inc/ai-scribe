@@ -123,11 +123,9 @@ function studiesFromUnknown(value: unknown, depth = 0): unknown[] {
     if (unwrapped.some(looksLikeStudy) || unwrapped.some((item) => typeof item === "string")) {
       return unwrapped;
     }
-    for (const item of unwrapped) {
-      const nested = studiesFromUnknown(item, depth + 1);
-      if (nested.length) return nested;
-    }
-    return [];
+    // Collect studies from every array item — do not stop at the first hit
+    // (multi-report agent envelopes often wrap each study separately).
+    return unwrapped.flatMap((item) => studiesFromUnknown(item, depth + 1));
   }
 
   const record = asRecord(unwrapped);
@@ -233,7 +231,9 @@ export function stitchReportTexts(
 export function buildSummaryMessage(combinedText: string): string {
   return (
     "You are given one or more MRI radiology reports for a single patient.\n\n" +
-    "Use the system instructions to create a pathology-only clinical summary.\n\n" +
+    "Use the system instructions to create a pathology-only clinical summary.\n" +
+    "Return one study entry for each === REPORT n === section in the input. " +
+    "Do not drop, merge, or skip any report region.\n\n" +
     `FULL MRI REPORTS TEXT:\n${combinedText}`
   );
 }
