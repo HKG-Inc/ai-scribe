@@ -314,47 +314,36 @@ export async function connectLiveSocket(session: LiveSessionInfo): Promise<WebSo
     ws.binaryType = "arraybuffer";
     let settled = false;
 
-    const finish = () => {
+    const fail = (error: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(fallbackTimer);
-      resolve(ws);
+      reject(error);
     };
-
-    const fallbackTimer = setTimeout(finish, 1500);
 
     ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: "auth",
-          live_token: session.live_token,
-          session_id: session.session_id,
-          protocol_version: session.protocol_version ?? 2,
-        })
-      );
-    };
-
-    ws.onmessage = (event) => {
-      if (settled || typeof event.data !== "string") return;
       try {
-        const frame = JSON.parse(event.data) as { type?: string };
-        if (
-          frame.type === "auth_ok" ||
-          frame.type === "ready" ||
-          frame.type === "authenticated"
-        ) {
-          finish();
-        }
-      } catch {
-        // Ignore non-JSON frames during handshake.
+        ws.send(
+          JSON.stringify({
+            type: "auth",
+            live_token: session.live_token,
+            session_id: session.session_id,
+            protocol_version: session.protocol_version ?? 2,
+          })
+        );
+        settled = true;
+        resolve(ws);
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error("Failed to send live auth"));
       }
     };
 
     ws.onerror = () => {
+      fail(new Error("Live WebSocket connection failed"));
+    };
+
+    ws.onclose = (event) => {
       if (!settled) {
-        settled = true;
-        clearTimeout(fallbackTimer);
-        reject(new Error("Live WebSocket connection failed"));
+        fail(new Error(`Live WebSocket closed before ready (${event.code})`));
       }
     };
   });

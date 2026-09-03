@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Eye } from "lucide-react";
+import { Eye, Loader2 } from "lucide-react";
 import { useAppSelector } from "@/store/hooks";
 import { PARENT_LANGUAGE, QUESTIONS, isNoSpeechResponse } from "@/lib/conversation-mode";
 import { PatientAnswerDisplay } from "@/components/recording/PatientAnswerDisplay";
@@ -69,6 +69,8 @@ export function TranscriptionPanel({
 
   const showTranslatedQuestion =
     !!selectedLanguage && selectedLanguage !== PARENT_LANGUAGE;
+
+  const isBufferingAnswer = questionnaireStatus === "Buffering...";
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -139,6 +141,15 @@ export function TranscriptionPanel({
                   questionTranslated={currentQuestionTranslated}
                   showTranslation={showTranslatedQuestion}
                 />
+                {isBufferingAnswer && !currentQuestionResponse && (
+                  <>
+                    <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>
+                    <div className="flex items-center gap-2 text-sm text-slate-500 italic">
+                      <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+                      Buffering...
+                    </div>
+                  </>
+                )}
                 {currentQuestionResponse && (
                   <>
                     <div className="text-sm font-semibold text-brand-blue mt-3">Patient</div>

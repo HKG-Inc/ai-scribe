@@ -67,12 +67,11 @@ export function ConversationalControls({
     cancelPlay,
     startRecording,
     stopRecordingAndTranscribe,
-    startQuestionnaireReplySession,
     stopQuestionnaireReplySession,
     setAnswerRecordingPaused,
   } = useQuestionnaireFlow();
   const [isQuestionnaireStarting, setIsQuestionnaireStarting] = useState(false);
-  const [isProcessingAnswer, setIsProcessingAnswer] = useState(false);
+  const [isBufferingAnswer, setIsBufferingAnswer] = useState(false);
   const isBusyRef = useRef(false);
 
   const hasValidResponse =
@@ -160,7 +159,6 @@ export function ConversationalControls({
     try {
       dispatch(startQuestionnaire());
       await playCurrentQuestion(0, selectedLanguage);
-      await startQuestionnaireReplySession();
     } catch (error) {
       stopQuestionnaireReplySession();
       const message =
@@ -187,31 +185,31 @@ export function ConversationalControls({
   };
 
   const handleSkip = async () => {
-    if (!selectedLanguage || isBusyRef.current) return;
+    if (!selectedLanguage || isBusyRef.current || isBufferingAnswer) return;
 
-    cancelPlay();
-    dispatch(setRecordingAnswer(false));
-    dispatch(setAnswerPaused(false));
-
-    const question = QUESTIONS[currentQuestionIndex];
-    if (question) {
-      dispatch(
-        addQAHistory({
-          question_id: question.id,
-          questionEn: question.text_en,
-          questionTranslated: currentQuestionTranslated,
-          responseEn: "Skipped",
-          responseTranslated: null,
-          language: selectedLanguage,
-          timestamp: createQuestionnaireTimestamp(),
-          questionNumber: currentQuestionIndex + 1,
-        })
-      );
-    }
-
-    const nextIndex = currentQuestionIndex + 1;
     isBusyRef.current = true;
     try {
+      await cancelPlay();
+      dispatch(setRecordingAnswer(false));
+      dispatch(setAnswerPaused(false));
+
+      const question = QUESTIONS[currentQuestionIndex];
+      if (question) {
+        dispatch(
+          addQAHistory({
+            question_id: question.id,
+            questionEn: question.text_en,
+            questionTranslated: currentQuestionTranslated,
+            responseEn: "Skipped",
+            responseTranslated: null,
+            language: selectedLanguage,
+            timestamp: createQuestionnaireTimestamp(),
+            questionNumber: currentQuestionIndex + 1,
+          })
+        );
+      }
+
+      const nextIndex = currentQuestionIndex + 1;
       if (nextIndex >= QUESTIONS.length) {
         stopQuestionnaireReplySession();
         dispatch(completeQuestionnaire());
@@ -232,11 +230,11 @@ export function ConversationalControls({
 
   const handleRecordAnswer = async () => {
     if (isRecordingAnswer) {
-      if (isProcessingAnswer) return;
-      setIsProcessingAnswer(true);
-      dispatch(setQuestionnaireStatus("Processing your response..."));
+      if (isBufferingAnswer) return;
+      setIsBufferingAnswer(true);
       dispatch(setRecordingAnswer(false));
       dispatch(setAnswerPaused(false));
+      dispatch(setQuestionnaireStatus("Buffering..."));
 
       try {
         const structured = await stopRecordingAndTranscribe();
@@ -258,14 +256,14 @@ export function ConversationalControls({
           dispatch(setQuestionnaireStatus(""));
         }
       } catch (error) {
-        dispatch(setCurrentQuestionResponse(NO_SPEECH_DETECTED));
-        dispatch(setCurrentResponseTranslated(null));
         const message =
           error instanceof Error ? error.message : "Failed to process answer";
+        dispatch(setCurrentQuestionResponse(""));
+        dispatch(setCurrentResponseTranslated(null));
         toast.error(message);
         dispatch(setQuestionnaireStatus("Ready to record your answer"));
       } finally {
-        setIsProcessingAnswer(false);
+        setIsBufferingAnswer(false);
       }
       return;
     }
@@ -362,6 +360,7 @@ export function ConversationalControls({
               !selectedLanguage ||
               isRecordingAnswer ||
               isAnswerPaused ||
+              isBufferingAnswer ||
               isQuestionnaireStarting ||
               questionnaireCompleted ||
               (questionnaireStarted && !canAdvanceToNext)
@@ -378,7 +377,7 @@ export function ConversationalControls({
           <button
             onClick={handleReplay}
             className="px-2 hover:bg-purple-500 text-blue-500 hover:text-white bg-transparent rounded-lg h-8 text-xs font-medium flex items-center gap-1"
-            disabled={isRecordingAnswer || isProcessingAnswer}
+            disabled={isRecordingAnswer || isBufferingAnswer}
           >
             <Repeat1 className="h-4 w-4" /> Question
           </button>
@@ -387,7 +386,7 @@ export function ConversationalControls({
 
       {(questionnaireStarted || questionnaireCompleted) && (
         <div className="flex space-x-4 items-center">
-          {questionnaireStarted && isRecordingAnswer && !isProcessingAnswer && (
+          {questionnaireStarted && isRecordingAnswer && !isBufferingAnswer && (
             <button
               onClick={handlePauseResumeAnswer}
               className="px-4 bg-orange-400 hover:bg-orange-500 text-white rounded-lg h-12 text-base font-medium shadow-sm"
@@ -401,7 +400,7 @@ export function ConversationalControls({
               onClick={() => void handleRecordAnswer()}
               className={cn(
                 "px-4 rounded-lg h-12 text-base font-medium shadow-sm flex items-center gap-2 min-w-[160px] justify-center",
-                isProcessingAnswer
+                isBufferingAnswer
                   ? "bg-sky-400 text-white cursor-wait"
                   : isRecordingAnswer
                     ? "bg-red-500 hover:bg-red-600 text-white"
@@ -409,11 +408,14 @@ export function ConversationalControls({
                       ? "bg-slate-200 text-slate-400"
                       : "bg-brand-green hover:bg-opacity-90 text-white"
               )}
-              disabled={isProcessingAnswer || (hasValidResponse && !isRecordingAnswer)}
+              disabled={
+                isBufferingAnswer ||
+                (hasValidResponse && !isRecordingAnswer)
+              }
             >
-              {isProcessingAnswer ? (
+              {isBufferingAnswer ? (
                 <>
-                  Processing...
+                  Buffering...
                   <Loader2 className="h-4 w-4 animate-spin" />
                 </>
               ) : isRecordingAnswer ? (

@@ -30,6 +30,7 @@ import {
   joinReplyText,
   mintQuestionnaireLiveSession,
   parseLiveEvent,
+  pcmRms,
   resamplePcm16,
   sendPcm,
   sendRecordedPcmStream,
@@ -45,6 +46,8 @@ import {
 
 export function useQuestionnaireFlow() {
   const playAbortRef = useRef<AbortController | null>(null);
+  const playEpochRef = useRef(0);
+  const playTurnActiveRef = useRef(false);
   const audioWsRef = useRef<WebSocket | null>(null);
   const audioSessionRef = useRef<LiveSessionInfo | null>(null);
   const replyWsRef = useRef<WebSocket | null>(null);
@@ -60,14 +63,9 @@ export function useQuestionnaireFlow() {
   const replyStructuredRef = useRef<ReplyStructured | null>(null);
   const replyAbortRef = useRef(false);
   const replyTurnEndedRef = useRef(false);
-  /** Live PCM is streamed only while the patient is recording an answer. */
-  const replySendingEnabledRef = useRef(false);
-  /** Block mic → reply-agent while a question is playing (avoid question audio as input). */
+  /** Block mic while a question is playing (avoid question audio as input). */
   const replyInputBlockedRef = useRef(false);
-  const answerTurnActiveRef = useRef(false);
-  const livePcmSamplesSentRef = useRef(0);
-  const pauseKeepaliveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const replySessionOpenedRef = useRef(false);
+  const recordingPausedRef = useRef(false);
 
   const ensurePlayer = useCallback(async () => {
     if (playerNodeRef.current) return;
@@ -81,15 +79,75 @@ export function useQuestionnaireFlow() {
     await playerCtxRef.current.resume();
   }, []);
 
-  const cancelPlay = useCallback(() => {
+  const notifyPlaySettled = useCallback(() => {
+    playTurnActiveRef.current = false;
+  }, []);
+
+  /**
+   * Stop local playback. When a play turn is active, interrupt the agent and
+   * drain until turn_complete/end (or timeout) so a late end cannot land on the
+   * next question's listener and stop its audio.
+   */
+  const cancelPlay = useCallback(async (options?: { settle?: boolean }) => {
+    playEpochRef.current += 1;
+    const wasActive = playTurnActiveRef.current || !!playAbortRef.current;
     playAbortRef.current?.abort();
     playAbortRef.current = null;
+
     if (playerNodeRef.current) {
       playerNodeRef.current.port.postMessage({ command: "reset" });
     }
     if (typeof window !== "undefined" && window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
+
+    const ws = audioWsRef.current;
+    const shouldSettle = options?.settle !== false && wasActive && isSocketOpen(ws);
+
+    if (!shouldSettle) {
+      playTurnActiveRef.current = false;
+      return;
+    }
+
+    try {
+      endTurn(ws!);
+    } catch {
+      // ignore
+    }
+
+    await new Promise<void>((resolve) => {
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        ws!.removeEventListener("message", onDrainMessage);
+        playTurnActiveRef.current = false;
+        resolve();
+      };
+
+      const onDrainMessage = (event: MessageEvent) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const frame = JSON.parse(event.data) as {
+            type?: string;
+            finished?: boolean;
+          };
+          if (
+            frame.type === "turn_complete" ||
+            frame.type === "end" ||
+            frame.finished === true
+          ) {
+            finish();
+          }
+        } catch {
+          // ignore non-JSON
+        }
+      };
+
+      ws!.addEventListener("message", onDrainMessage);
+      const timer = setTimeout(finish, 400);
+    });
   }, []);
 
   const ensureAudioLive = useCallback(async (agentSlug: string) => {
@@ -149,7 +207,7 @@ export function useQuestionnaireFlow() {
 
   const attachReplySocketHandlers = useCallback(
     (ws: WebSocket) => {
-      ws.onmessage = (event) => {
+      const onMessage = (event: MessageEvent) => {
         void (async () => {
           let payload: string | ArrayBuffer = event.data;
           if (payload instanceof Blob) {
@@ -161,11 +219,11 @@ export function useQuestionnaireFlow() {
         })();
       };
 
+      ws.addEventListener("message", onMessage);
       ws.addEventListener("close", () => {
+        ws.removeEventListener("message", onMessage);
         if (replyWsRef.current === ws) {
           replyWsRef.current = null;
-          answerTurnActiveRef.current = false;
-          replySendingEnabledRef.current = false;
         }
       });
     },
@@ -192,107 +250,18 @@ export function useQuestionnaireFlow() {
     return ws;
   }, [attachReplySocketHandlers]);
 
-  /**
-   * Open one reply-agent WebSocket after the first question is spoken.
-   * Kept alive until the questionnaire ends; each answer uses start/end turns only.
-   */
-  const startQuestionnaireReplySession = useCallback(async () => {
-    if (replySessionOpenedRef.current && isSocketOpen(replyWsRef.current)) {
-      return replyWsRef.current!;
-    }
-    replySessionOpenedRef.current = true;
-    return connectReplyLive();
-  }, [connectReplyLive]);
-
-  const stopPauseKeepalive = useCallback(() => {
-    if (pauseKeepaliveTimerRef.current) {
-      clearInterval(pauseKeepaliveTimerRef.current);
-      pauseKeepaliveTimerRef.current = null;
-    }
-  }, []);
-
-  const startPauseKeepalive = useCallback(() => {
-    stopPauseKeepalive();
-    pauseKeepaliveTimerRef.current = setInterval(() => {
-      if (
-        !answerTurnActiveRef.current ||
-        replySendingEnabledRef.current ||
-        replyInputBlockedRef.current
-      ) {
-        return;
-      }
-      const ws = replyWsRef.current;
-      if (!isSocketOpen(ws)) return;
-      sendPcm(ws!, silentPcmChunk());
-    }, 4000);
-  }, [stopPauseKeepalive]);
-
   /** Close reply-agent session when questionnaire ends. */
   const stopQuestionnaireReplySession = useCallback(() => {
-    replySendingEnabledRef.current = false;
     replyInputBlockedRef.current = false;
-    answerTurnActiveRef.current = false;
-    livePcmSamplesSentRef.current = 0;
-    replySessionOpenedRef.current = false;
-    stopPauseKeepalive();
+    recordingPausedRef.current = false;
     disconnectLive(replyWsRef.current);
     replyWsRef.current = null;
     replySessionRef.current = null;
-  }, [stopPauseKeepalive]);
+  }, []);
 
   const setReplyInputBlocked = useCallback((blocked: boolean) => {
     replyInputBlockedRef.current = blocked;
   }, []);
-
-  const sendLivePcmChunk = useCallback((chunk: Int16Array) => {
-    if (
-      !replySendingEnabledRef.current ||
-      replyInputBlockedRef.current ||
-      !answerTurnActiveRef.current
-    ) {
-      return;
-    }
-
-    const ws = replyWsRef.current;
-    if (!isSocketOpen(ws)) return;
-
-    sendPcm(ws!, chunk);
-    livePcmSamplesSentRef.current += chunk.length;
-  }, []);
-
-  const beginAnswerTurn = useCallback(async () => {
-    replyStructuredRef.current = null;
-    replySegmentsRef.current = [];
-    replyAbortRef.current = false;
-    replyTurnEndedRef.current = false;
-    livePcmSamplesSentRef.current = 0;
-
-    if (!replySessionOpenedRef.current) {
-      throw new Error("Reply session is not ready yet. Wait for the question to finish playing.");
-    }
-
-    let ws = replyWsRef.current;
-    if (!isSocketOpen(ws)) {
-      ws = await connectReplyLive();
-    }
-
-    startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
-    sendPcm(ws, silentPcmChunk());
-    answerTurnActiveRef.current = true;
-    replySendingEnabledRef.current = true;
-  }, [connectReplyLive]);
-
-  const setAnswerRecordingPaused = useCallback(
-    (paused: boolean) => {
-      replySendingEnabledRef.current = !paused && answerTurnActiveRef.current;
-      if (paused && answerTurnActiveRef.current) {
-        startPauseKeepalive();
-      } else {
-        stopPauseKeepalive();
-      }
-    },
-    [startPauseKeepalive, stopPauseKeepalive]
-  );
 
   const playViaAgent = useCallback(
     async (
@@ -311,14 +280,41 @@ export function useQuestionnaireFlow() {
 
       const ws = await ensureAudioLive(QUESTIONNAIRE_PLAY_AGENT);
       let translatedText = language === PARENT_LANGUAGE ? question.text_en : "";
+      const myEpoch = playEpochRef.current;
+      let heardOutput = false;
+
+      playTurnActiveRef.current = true;
 
       await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => resolve(), 25000);
+        let settled = false;
+        const timeout = setTimeout(() => finishResolve(), 25000);
+
+        const finishResolve = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          ws.removeEventListener("message", onMessage);
+          notifyPlaySettled();
+          resolve();
+        };
+
+        const finishReject = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          ws.removeEventListener("message", onMessage);
+          // Keep playTurnActive true so cancelPlay can drain the interrupted turn.
+          if (!signal.aborted) {
+            notifyPlaySettled();
+          }
+          reject(error);
+        };
+
+        const isCurrent = () =>
+          !signal.aborted && playEpochRef.current === myEpoch;
 
         const onMessage = (event: MessageEvent) => {
-          if (signal.aborted) {
-            clearTimeout(timeout);
-            reject(new DOMException("Aborted", "AbortError"));
+          if (!isCurrent()) {
             return;
           }
 
@@ -327,9 +323,11 @@ export function useQuestionnaireFlow() {
             if (payload instanceof Blob) {
               payload = await payload.arrayBuffer();
             }
+            if (!isCurrent()) return;
 
             const parsed = parseLiveEvent(payload);
             if (parsed.binary && playerNodeRef.current) {
+              heardOutput = true;
               playerNodeRef.current.port.postMessage(parsed.binary, [parsed.binary]);
               return;
             }
@@ -347,6 +345,7 @@ export function useQuestionnaireFlow() {
                 source !== "input_transcription" &&
                 (source === "output" || source === "output_transcription" || !source)
               ) {
+                heardOutput = true;
                 translatedText = text;
                 onTranslatedText?.(text);
               }
@@ -357,9 +356,10 @@ export function useQuestionnaireFlow() {
               parsed.type === "end" ||
               parsed.finished === true
             ) {
-              clearTimeout(timeout);
-              ws.removeEventListener("message", onMessage);
-              resolve();
+              // Late end from a skipped turn can arrive before this turn's audio.
+              // Ignore until we have heard output for THIS play.
+              if (!heardOutput) return;
+              finishResolve();
             }
           })();
         };
@@ -372,9 +372,7 @@ export function useQuestionnaireFlow() {
         signal.addEventListener(
           "abort",
           () => {
-            clearTimeout(timeout);
-            ws.removeEventListener("message", onMessage);
-            reject(new DOMException("Aborted", "AbortError"));
+            finishReject(new DOMException("Aborted", "AbortError"));
           },
           { once: true }
         );
@@ -382,7 +380,7 @@ export function useQuestionnaireFlow() {
 
       return translatedText;
     },
-    [ensureAudioLive, ensurePlayer]
+    [ensureAudioLive, ensurePlayer, notifyPlaySettled]
   );
 
   const playQuestion = useCallback(
@@ -396,11 +394,13 @@ export function useQuestionnaireFlow() {
         throw new Error("Question not found");
       }
 
-      cancelPlay();
+      // Settle any in-flight play so a late end cannot stop this question.
+      await cancelPlay({ settle: true });
       setReplyInputBlocked(true);
 
       const controller = new AbortController();
       playAbortRef.current = controller;
+      playEpochRef.current += 1;
 
       let translatedText = "";
       const notifyTranslation = (text: string) => {
@@ -417,7 +417,9 @@ export function useQuestionnaireFlow() {
           notifyTranslation
         );
       } finally {
-        playAbortRef.current = null;
+        if (playAbortRef.current === controller) {
+          playAbortRef.current = null;
+        }
         setReplyInputBlocked(false);
       }
 
@@ -437,16 +439,12 @@ export function useQuestionnaireFlow() {
     }
   }, []);
 
+  /** Record locally only; reply-agent is called after the patient stops. */
   const startRecording = useCallback(async () => {
-    cancelPlay();
+    await cancelPlay({ settle: true });
     setReplyInputBlocked(false);
-    stopPauseKeepalive();
+    recordingPausedRef.current = false;
     pcmPartsRef.current = [];
-    replySendingEnabledRef.current = false;
-    answerTurnActiveRef.current = false;
-
-    // One persistent WS; each answer opens a new audio turn on it.
-    await beginAnswerTurn();
 
     recStreamRef.current = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -470,28 +468,22 @@ export function useQuestionnaireFlow() {
     recNodeRef.current.connect(silentGain);
     silentGain.connect(recCtxRef.current.destination);
     recNodeRef.current.port.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
-      let chunk = new Int16Array(event.data.slice(0));
-      if (recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE) {
-        chunk = resamplePcm16(
-          chunk,
-          recSampleRateRef.current,
-          TARGET_PCM_SAMPLE_RATE
-        );
-      }
-      pcmPartsRef.current.push(chunk);
-      sendLivePcmChunk(chunk);
+      if (!(event.data instanceof ArrayBuffer) || recordingPausedRef.current) return;
+      const raw = new Int16Array(event.data.slice(0));
+      const chunk =
+        recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE
+          ? resamplePcm16(raw, recSampleRateRef.current, TARGET_PCM_SAMPLE_RATE)
+          : raw;
+      pcmPartsRef.current.push(chunk as Int16Array);
     };
     if (recCtxRef.current.state === "suspended") {
       await recCtxRef.current.resume();
     }
-  }, [
-    beginAnswerTurn,
-    cancelPlay,
-    sendLivePcmChunk,
-    setReplyInputBlocked,
-    stopPauseKeepalive,
-  ]);
+  }, [cancelPlay, setReplyInputBlocked]);
+
+  const setAnswerRecordingPaused = useCallback((paused: boolean) => {
+    recordingPausedRef.current = paused;
+  }, []);
 
   const waitForReplyQuiet = useCallback(async (): Promise<ReplyStructured | null> => {
     const started = Date.now();
@@ -533,9 +525,12 @@ export function useQuestionnaireFlow() {
     return replyStructuredRef.current;
   }, []);
 
+  /**
+   * Stop local recording, then call questionnaire-reply-agent with the full audio
+   * and wait until the agent returns a transcription.
+   */
   const stopRecordingAndTranscribe = useCallback(async (): Promise<ReplyStructured | null> => {
-    replySendingEnabledRef.current = false;
-    stopPauseKeepalive();
+    recordingPausedRef.current = false;
     stopMic();
 
     const compressed = compressSilenceChunks(pcmPartsRef.current);
@@ -543,43 +538,49 @@ export function useQuestionnaireFlow() {
     const pcm = concatInt16(pcmPartsRef.current);
 
     if (pcm.length < MIN_ANSWER_SAMPLES) {
-      answerTurnActiveRef.current = false;
       throw new Error("Recording too short. Speak longer, then stop.");
     }
 
-    const ws = replyWsRef.current;
-    if (!isSocketOpen(ws) || !answerTurnActiveRef.current) {
-      answerTurnActiveRef.current = false;
+    if (pcmRms(pcm) < 180) {
+      throw new Error("Could not detect speech in the recording. Speak louder and try again.");
+    }
+
+    replyStructuredRef.current = null;
+    replySegmentsRef.current = [];
+    replyAbortRef.current = false;
+    replyTurnEndedRef.current = false;
+
+    const ws = await connectReplyLive();
+    if (!isSocketOpen(ws)) {
       throw new Error("Reply agent session is not connected");
     }
 
-    // Stream live while recording; on stop always replay the full buffered PCM, then end turn.
-    await sendRecordedPcmStream(ws!, pcm);
-    endTurn(ws!);
-    answerTurnActiveRef.current = false;
-    livePcmSamplesSentRef.current = 0;
+    startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
+    sendPcm(ws, silentPcmChunk());
+    await sleep(30);
+    await sendRecordedPcmStream(ws, pcm);
+    endTurn(ws);
+
     return waitForReplyQuiet();
-  }, [stopMic, stopPauseKeepalive, waitForReplyQuiet]);
+  }, [connectReplyLive, stopMic, waitForReplyQuiet]);
 
   useEffect(() => {
     return () => {
-      cancelPlay();
+      void cancelPlay({ settle: false });
       stopMic();
-      stopPauseKeepalive();
       stopQuestionnaireReplySession();
       disconnectLive(audioWsRef.current);
       if (playerCtxRef.current) {
         void playerCtxRef.current.close();
       }
     };
-  }, [cancelPlay, stopMic, stopPauseKeepalive, stopQuestionnaireReplySession]);
+  }, [cancelPlay, stopMic, stopQuestionnaireReplySession]);
 
   return {
     playQuestion,
     cancelPlay,
     startRecording,
     stopRecordingAndTranscribe,
-    startQuestionnaireReplySession,
     stopQuestionnaireReplySession,
     setAnswerRecordingPaused,
   };
