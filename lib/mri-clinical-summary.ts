@@ -9,6 +9,7 @@ import {
 } from "@/lib/mri-pdf";
 import {
   buildSummaryMessage,
+  describeMriAgentEnvelope,
   extractMriAgentOutput,
   MRI_OCR_AGENT,
   MRI_SUMMARY_AGENT,
@@ -202,20 +203,20 @@ export async function generateMriClinicalSummary(
     MRI_AGENT_TIMEOUT_MS
   );
 
+  console.log(
+    "[mri-clinical-summary-agent]",
+    describeMriAgentEnvelope(raw)
+  );
+
   const data = parseSummaryOutput(raw);
 
   if (!data.studies.length) {
-    const root =
-      raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
-    const topKeys = root ? Object.keys(root).join(",") : typeof raw;
-    const responseKeys =
-      root?.response && typeof root.response === "object"
-        ? Object.keys(root.response as object).join(",")
-        : "";
+    console.warn(
+      "[mri-clinical-summary-agent] no studies parsed:",
+      describeMriAgentEnvelope(raw)
+    );
     throw new Error(
-      `Summary agent returned no studies (keys=${topKeys}` +
-        (responseKeys ? ` response.keys=${responseKeys}` : "") +
-        ")"
+      `Summary agent returned no studies (${describeMriAgentEnvelope(raw)})`
     );
   }
 

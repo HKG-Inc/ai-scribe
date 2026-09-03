@@ -30,6 +30,23 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+function readKey(record: Record<string, unknown>, name: string): unknown {
+  if (name in record) return record[name];
+  const lower = name.toLowerCase().replace(/_/g, "");
+  for (const [key, value] of Object.entries(record)) {
+    if (key.toLowerCase().replace(/_/g, "") === lower) return value;
+  }
+  return undefined;
+}
+
+function readString(record: Record<string, unknown>, ...names: string[]): string {
+  for (const name of names) {
+    const value = readKey(record, name);
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+}
+
 /** Parse JSON from plain or markdown-fenced agent content. */
 function parseJsonLoose(value: string): unknown {
   const trimmed = value.trim();
@@ -48,9 +65,20 @@ function parseJsonLoose(value: string): unknown {
 
   const firstBrace = withoutFence.indexOf("{");
   const lastBrace = withoutFence.lastIndexOf("}");
+  const firstBracket = withoutFence.indexOf("[");
+  const lastBracket = withoutFence.lastIndexOf("]");
+
   if (firstBrace >= 0 && lastBrace > firstBrace) {
     try {
       return JSON.parse(withoutFence.slice(firstBrace, lastBrace + 1));
+    } catch {
+      // Try array if object slice failed.
+    }
+  }
+
+  if (firstBracket >= 0 && lastBracket > firstBracket) {
+    try {
+      return JSON.parse(withoutFence.slice(firstBracket, lastBracket + 1));
     } catch {
       return null;
     }
@@ -59,85 +87,130 @@ function parseJsonLoose(value: string): unknown {
   return null;
 }
 
-function coerceRecord(value: unknown): Record<string, unknown> | null {
-  if (!value) return null;
-  if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
+function unwrapValue(value: unknown, depth = 0): unknown {
+  if (depth > 6 || value == null) return value;
   if (typeof value === "string") {
-    return asRecord(parseJsonLoose(value));
+    const parsed = parseJsonLoose(value);
+    return parsed == null ? value : unwrapValue(parsed, depth + 1);
   }
-  return null;
+  return value;
 }
 
-function hasStudies(record: Record<string, unknown> | null): boolean {
+const STUDY_LIST_KEYS = [
+  "studies",
+  "study",
+  "mri_studies",
+  "mriStudies",
+  "reports",
+  "exams",
+];
+
+function looksLikeStudy(value: unknown): boolean {
+  const record = asRecord(value);
   if (!record) return false;
-  if (Array.isArray(record.studies) && record.studies.length > 0) return true;
-  if (typeof record.studies === "string" && record.studies.trim()) return true;
-  return false;
+  return Boolean(
+    readString(record, "filename", "region", "human_label", "humanLabel") ||
+      readString(record, "findings_text", "findingsText", "impressions_text") ||
+      Array.isArray(readKey(record, "findings"))
+  );
+}
+
+function studiesFromUnknown(value: unknown, depth = 0): unknown[] {
+  if (depth > 6 || value == null) return [];
+
+  const unwrapped = unwrapValue(value);
+  if (Array.isArray(unwrapped)) {
+    if (unwrapped.some(looksLikeStudy) || unwrapped.some((item) => typeof item === "string")) {
+      return unwrapped;
+    }
+    for (const item of unwrapped) {
+      const nested = studiesFromUnknown(item, depth + 1);
+      if (nested.length) return nested;
+    }
+    return [];
+  }
+
+  const record = asRecord(unwrapped);
+  if (!record) return [];
+
+  for (const key of STUDY_LIST_KEYS) {
+    const raw = readKey(record, key);
+    if (raw == null) continue;
+    const nested = studiesFromUnknown(raw, depth + 1);
+    if (nested.length) return nested;
+  }
+
+  for (const key of [
+    "final_output",
+    "formatted_output",
+    "clinical_summary",
+    "data",
+    "result",
+    "output",
+    "content",
+    "summary",
+    "text",
+  ]) {
+    const nested = studiesFromUnknown(readKey(record, key), depth + 1);
+    if (nested.length) return nested;
+  }
+
+  if (looksLikeStudy(record)) return [record];
+  return [];
 }
 
 /**
- * Walk common Hikigai envelopes and pick the record that actually carries
- * `{ patient_label, studies }`. Avoids short-circuiting on an empty `output`.
+ * Walk the Hikigai invoke envelope (`output` is the schema object).
+ * Also accepts `output` as a studies array or JSON/markdown string.
  */
 export function extractMriAgentOutput(payload: unknown): Record<string, unknown> {
   const root = asRecord(payload);
   if (!root) return {};
 
-  const response = asRecord(root.response);
-  const candidates: Array<Record<string, unknown> | null> = [
-    coerceRecord(root.output),
-    coerceRecord(response?.output),
-    coerceRecord(root.content),
-    coerceRecord(response?.content),
-    coerceRecord(root.result),
-    coerceRecord(root.data),
-    coerceRecord(asRecord(root.output)?.formatted_output),
-    coerceRecord(asRecord(root.output)?.final_output),
-    coerceRecord(response?.formatted_output),
-    coerceRecord(response?.final_output),
-    root,
-    response,
-  ];
-
-  for (const candidate of candidates) {
-    if (hasStudies(candidate)) {
-      return candidate as Record<string, unknown>;
-    }
+  const studies = studiesFromUnknown(root.output);
+  if (studies.length) {
+    const outputRecord = asRecord(unwrapValue(root.output));
+    return {
+      ...(outputRecord ?? {}),
+      studies,
+    };
   }
 
-  // Deep scan: platform sometimes nests schema under an unexpected key.
-  const queue: unknown[] = [root];
-  const seen = new Set<unknown>();
-  while (queue.length) {
-    const current = queue.shift();
-    if (!current || typeof current !== "object" || seen.has(current)) continue;
-    seen.add(current);
-
-    if (!Array.isArray(current)) {
-      const record = current as Record<string, unknown>;
-      if (hasStudies(record)) return record;
-      for (const value of Object.values(record)) {
-        if (typeof value === "string" && value.includes("{")) {
-          const parsed = coerceRecord(value);
-          if (hasStudies(parsed)) return parsed as Record<string, unknown>;
-        } else if (value && typeof value === "object") {
-          queue.push(value);
-        }
-      }
-    } else {
-      for (const item of current) queue.push(item);
-    }
+  const fromRest = studiesFromUnknown(root);
+  if (fromRest.length) {
+    return { ...root, studies: fromRest };
   }
 
-  return (
-    coerceRecord(root.output) ||
-    coerceRecord(response?.output) ||
-    coerceRecord(root.content) ||
-    coerceRecord(response?.content) ||
-    root
-  );
+  const outputRecord =
+    asRecord(unwrapValue(root.output)) ||
+    asRecord(unwrapValue(root.content)) ||
+    asRecord(unwrapValue(asRecord(root.response)?.output)) ||
+    asRecord(unwrapValue(asRecord(root.response)?.content)) ||
+    {};
+
+  return outputRecord;
+}
+
+/** Compact envelope description for 500s — no full MRI text. */
+export function describeMriAgentEnvelope(payload: unknown): string {
+  const root = asRecord(payload);
+  if (!root) return `type=${typeof payload}`;
+
+  const output = root.output;
+  let outputDesc = "undefined";
+  if (output === null) {
+    outputDesc = "null";
+  } else if (typeof output === "string") {
+    outputDesc = `string(len=${output.length})`;
+  } else if (Array.isArray(output)) {
+    outputDesc = `array(len=${output.length})`;
+  } else if (typeof output === "object") {
+    outputDesc = `object keys=${Object.keys(output).join(",") || "(empty)"}`;
+  } else if (output !== undefined) {
+    outputDesc = typeof output;
+  }
+
+  return `keys=${Object.keys(root).join(",")} output=${outputDesc}`;
 }
 
 /** Step 4 — stitch reports for the summary agent. */
@@ -166,50 +239,67 @@ export function buildSummaryMessage(combinedText: string): string {
 }
 
 function normalizeFindings(raw: unknown): Array<MriFinding | string> {
+  if (typeof raw === "string" && raw.trim()) return [raw.trim()];
   if (!Array.isArray(raw)) return [];
   return raw as Array<MriFinding | string>;
 }
 
-function normalizeStudy(raw: Record<string, unknown>): MriStudy {
+function studyFromProse(text: string): MriStudy {
   return {
-    filename: typeof raw.filename === "string" ? raw.filename : "",
-    region: typeof raw.region === "string" ? raw.region : "",
-    human_label: typeof raw.human_label === "string" ? raw.human_label : "",
-    date: typeof raw.date === "string" ? raw.date : "",
-    contrast: typeof raw.contrast === "string" ? raw.contrast : "",
-    doctor_name: typeof raw.doctor_name === "string" ? raw.doctor_name : "",
-    findings_text:
-      typeof raw.findings_text === "string" ? raw.findings_text : "",
-    impressions_text:
-      typeof raw.impressions_text === "string" ? raw.impressions_text : "",
-    findings: normalizeFindings(raw.findings),
+    filename: "",
+    region: "",
+    human_label: "",
+    date: "",
+    contrast: "",
+    doctor_name: "",
+    findings_text: text,
+    impressions_text: "",
+    findings: [text],
   };
 }
 
-function coerceStudies(raw: unknown): unknown[] {
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === "string" && raw.trim()) {
-    const parsed = parseJsonLoose(raw);
-    if (Array.isArray(parsed)) return parsed;
+function normalizeStudy(raw: Record<string, unknown>): MriStudy {
+  return {
+    filename: readString(raw, "filename"),
+    region: readString(raw, "region"),
+    human_label: readString(raw, "human_label", "humanLabel", "label"),
+    date: readString(raw, "date"),
+    contrast: readString(raw, "contrast"),
+    doctor_name: readString(raw, "doctor_name", "doctorName", "physician"),
+    findings_text: readString(raw, "findings_text", "findingsText"),
+    impressions_text: readString(raw, "impressions_text", "impressionsText"),
+    findings: normalizeFindings(readKey(raw, "findings")),
+  };
+}
+
+function toStudy(item: unknown): MriStudy | null {
+  if (typeof item === "string" && item.trim()) {
+    return studyFromProse(item.trim());
   }
-  return [];
+  const record = asRecord(unwrapValue(item));
+  if (!record) return null;
+  return normalizeStudy(record);
 }
 
 export function parseSummaryOutput(payload: unknown): MriClinicalSummaryData {
   const output = extractMriAgentOutput(payload);
   const patient_label =
-    typeof output.patient_label === "string" && output.patient_label.trim()
-      ? output.patient_label.trim()
-      : "PATIENT 1";
+    readString(output, "patient_label", "patientLabel") || "PATIENT 1";
 
-  const studiesRaw = coerceStudies(output.studies);
-  const studies = studiesRaw
-    .map((item) =>
-      item && typeof item === "object"
-        ? normalizeStudy(item as Record<string, unknown>)
-        : null
-    )
+  let studies = studiesFromUnknown(output.studies)
+    .map(toStudy)
     .filter((item): item is MriStudy => item !== null);
+
+  if (!studies.length) {
+    studies = studiesFromUnknown(output)
+      .map(toStudy)
+      .filter((item): item is MriStudy => item !== null);
+  }
+
+  if (!studies.length) {
+    const prose = readString(output, "content", "summary", "text", "extracted_text");
+    if (prose) studies = [studyFromProse(prose)];
+  }
 
   return { patient_label, studies };
 }
