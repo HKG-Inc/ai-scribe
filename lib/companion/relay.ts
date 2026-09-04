@@ -103,17 +103,20 @@ export class VisitTranscriptRelay {
 
     socket.onclose = (event) => {
       if (this.socket !== socket) return;
+      const wasAuthenticated = this.authenticated;
       this.socket = null;
       this.authenticated = false;
       this.stopHello();
 
-      console.warn(
-        "[companion-relay] closed",
-        event.code,
-        event.reason || "(no reason)",
-        "wasClean=",
-        event.wasClean
-      );
+      if (wasAuthenticated) {
+        console.warn(
+          "[companion-relay] closed",
+          event.code,
+          event.reason || "(no reason)",
+          "wasClean=",
+          event.wasClean
+        );
+      }
 
       if (this.disposed) {
         this.setStatus("closed");

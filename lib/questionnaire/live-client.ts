@@ -3,6 +3,7 @@ import {
   KEEP_SILENCE_CHUNKS,
   PCM_CHUNK_SAMPLES,
   PCM_SEND_GAP_MS,
+  REPLY_TRAILING_SILENCE_MS,
 } from "@/lib/questionnaire/constants";
 import { withBasePath } from "@/lib/utils";
 
@@ -394,6 +395,28 @@ export function getPcmPlayerWorkletUrl(): string {
 
 export function silentPcmChunk(samples = PCM_CHUNK_SAMPLES): Int16Array {
   return new Int16Array(samples);
+}
+
+/**
+ * Send ~durationMs of silence so the agent can detect a pause and emit
+ * transcription before the turn ends. User does not need to stay quiet.
+ */
+export async function sendTrailingSilence(
+  ws: WebSocket,
+  durationMs = REPLY_TRAILING_SILENCE_MS,
+  gapMs = PCM_SEND_GAP_MS
+): Promise<void> {
+  const chunkCount = Math.max(1, Math.round(durationMs / Math.max(gapMs, 1)));
+  const silence = silentPcmChunk();
+  for (let i = 0; i < chunkCount; i++) {
+    if (!isSocketOpen(ws)) {
+      throw new Error("Live session closed while sending trailing silence");
+    }
+    sendPcm(ws, silence);
+    if (gapMs > 0 && i < chunkCount - 1) {
+      await sleep(gapMs);
+    }
+  }
 }
 
 /** Replay buffered PCM to the live agent in real-time sized chunks. */

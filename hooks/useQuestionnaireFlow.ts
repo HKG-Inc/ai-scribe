@@ -17,7 +17,6 @@ import {
   languageNameForPrompt,
 } from "@/lib/questionnaire/constants";
 import {
-  compressSilenceChunks,
   concatInt16,
   connectLiveSocket,
   disconnectLive,
@@ -35,6 +34,7 @@ import {
   sendPcm,
   sendRecordedPcmStream,
   sendText,
+  sendTrailingSilence,
   shouldAcceptReplyEvent,
   silentPcmChunk,
   sleep,
@@ -52,6 +52,9 @@ export function useQuestionnaireFlow() {
   const audioSessionRef = useRef<LiveSessionInfo | null>(null);
   const replyWsRef = useRef<WebSocket | null>(null);
   const replySessionRef = useRef<LiveSessionInfo | null>(null);
+  /** Question index this reply WS belongs to; reused for no-speech / replay. */
+  const replyQuestionIndexRef = useRef<number | null>(null);
+  const replyConnectPromiseRef = useRef<Promise<WebSocket> | null>(null);
   const playerCtxRef = useRef<AudioContext | null>(null);
   const playerNodeRef = useRef<AudioWorkletNode | null>(null);
   const recCtxRef = useRef<AudioContext | null>(null);
@@ -66,6 +69,7 @@ export function useQuestionnaireFlow() {
   /** Block mic while a question is playing (avoid question audio as input). */
   const replyInputBlockedRef = useRef(false);
   const recordingPausedRef = useRef(false);
+  const liveStreamActiveRef = useRef(false);
 
   const ensurePlayer = useCallback(async () => {
     if (playerNodeRef.current) return;
@@ -230,34 +234,73 @@ export function useQuestionnaireFlow() {
     [handleReplyEvent]
   );
 
-  const connectReplyLive = useCallback(async () => {
-    if (isSocketOpen(replyWsRef.current) && replySessionRef.current) {
-      return replyWsRef.current!;
-    }
-
-    disconnectLive(replyWsRef.current);
-    replyWsRef.current = null;
-
-    const existingSessionId = replySessionRef.current?.session_id;
-    const session = await mintQuestionnaireLiveSession(
-      QUESTIONNAIRE_REPLY_AGENT,
-      existingSessionId
-    );
-    replySessionRef.current = session;
-    const ws = await connectLiveSocket(session);
-    replyWsRef.current = ws;
-    attachReplySocketHandlers(ws);
-    return ws;
-  }, [attachReplySocketHandlers]);
-
-  /** Close reply-agent session when questionnaire ends. */
+  /** Close reply-agent session (Next / Skip / complete / unmount). */
   const stopQuestionnaireReplySession = useCallback(() => {
     replyInputBlockedRef.current = false;
     recordingPausedRef.current = false;
+    liveStreamActiveRef.current = false;
+    replyConnectPromiseRef.current = null;
+    replyQuestionIndexRef.current = null;
     disconnectLive(replyWsRef.current);
     replyWsRef.current = null;
     replySessionRef.current = null;
   }, []);
+
+  /**
+   * Ensure a reply-agent live WS for this question.
+   * - Same question (no-speech retry / replay): reuse open session.
+   * - New question: mint a fresh session and connect (no session_id reuse).
+   */
+  const ensureReplySessionForQuestion = useCallback(
+    async (questionIndex: number): Promise<WebSocket> => {
+      if (
+        replyQuestionIndexRef.current === questionIndex &&
+        isSocketOpen(replyWsRef.current) &&
+        replySessionRef.current
+      ) {
+        return replyWsRef.current!;
+      }
+
+      if (
+        replyQuestionIndexRef.current === questionIndex &&
+        replyConnectPromiseRef.current
+      ) {
+        return replyConnectPromiseRef.current;
+      }
+
+      // Different question (or missing) — close previous session.
+      disconnectLive(replyWsRef.current);
+      replyWsRef.current = null;
+      replySessionRef.current = null;
+      replyQuestionIndexRef.current = questionIndex;
+
+      const connectPromise = (async () => {
+        const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_REPLY_AGENT);
+        if (replyQuestionIndexRef.current !== questionIndex) {
+          throw new Error("Reply session aborted for newer question");
+        }
+        replySessionRef.current = session;
+        const ws = await connectLiveSocket(session);
+        if (replyQuestionIndexRef.current !== questionIndex) {
+          disconnectLive(ws);
+          throw new Error("Reply session aborted for newer question");
+        }
+        replyWsRef.current = ws;
+        attachReplySocketHandlers(ws);
+        return ws;
+      })();
+
+      replyConnectPromiseRef.current = connectPromise;
+      try {
+        return await connectPromise;
+      } finally {
+        if (replyConnectPromiseRef.current === connectPromise) {
+          replyConnectPromiseRef.current = null;
+        }
+      }
+    },
+    [attachReplySocketHandlers]
+  );
 
   const setReplyInputBlocked = useCallback((blocked: boolean) => {
     replyInputBlockedRef.current = blocked;
@@ -398,6 +441,12 @@ export function useQuestionnaireFlow() {
       await cancelPlay({ settle: true });
       setReplyInputBlocked(true);
 
+      // Open reply-agent session while question audio plays so Record
+      // can stream immediately (reuse if same question / no-speech).
+      void ensureReplySessionForQuestion(questionIndex).catch(() => {
+        // Best effort; startRecording will retry.
+      });
+
       const controller = new AbortController();
       playAbortRef.current = controller;
       playEpochRef.current += 1;
@@ -425,7 +474,7 @@ export function useQuestionnaireFlow() {
 
       return { translatedText };
     },
-    [cancelPlay, playViaAgent, setReplyInputBlocked]
+    [cancelPlay, ensureReplySessionForQuestion, playViaAgent, setReplyInputBlocked]
   );
 
   const stopMic = useCallback(() => {
@@ -439,47 +488,80 @@ export function useQuestionnaireFlow() {
     }
   }, []);
 
-  /** Record locally only; reply-agent is called after the patient stops. */
-  const startRecording = useCallback(async () => {
-    await cancelPlay({ settle: true });
-    setReplyInputBlocked(false);
-    recordingPausedRef.current = false;
-    pcmPartsRef.current = [];
+  /**
+   * Start recording with live streaming to the reply-agent WebSocket.
+   * Session should already be open from playQuestion; we only start the
+   * audio turn and stream. PCM is also buffered for fallback resend.
+   */
+  const startRecording = useCallback(
+    async (questionIndex: number) => {
+      await cancelPlay({ settle: true });
+      setReplyInputBlocked(false);
+      recordingPausedRef.current = false;
+      pcmPartsRef.current = [];
+      liveStreamActiveRef.current = false;
 
-    recStreamRef.current = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
-    recCtxRef.current = new AudioContext({
-      sampleRate: TARGET_PCM_SAMPLE_RATE,
-      latencyHint: "interactive",
-    });
-    recSampleRateRef.current = recCtxRef.current.sampleRate;
-    await recCtxRef.current.audioWorklet.addModule(getPcmRecorderWorkletUrl());
-    recNodeRef.current = new AudioWorkletNode(recCtxRef.current, "pcm-recorder-processor");
-    const source = recCtxRef.current.createMediaStreamSource(recStreamRef.current);
-    source.connect(recNodeRef.current);
-    const silentGain = recCtxRef.current.createGain();
-    silentGain.gain.value = 0;
-    recNodeRef.current.connect(silentGain);
-    silentGain.connect(recCtxRef.current.destination);
-    recNodeRef.current.port.onmessage = (event) => {
-      if (!(event.data instanceof ArrayBuffer) || recordingPausedRef.current) return;
-      const raw = new Int16Array(event.data.slice(0));
-      const chunk =
-        recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE
-          ? resamplePcm16(raw, recSampleRateRef.current, TARGET_PCM_SAMPLE_RATE)
-          : raw;
-      pcmPartsRef.current.push(chunk as Int16Array);
-    };
-    if (recCtxRef.current.state === "suspended") {
-      await recCtxRef.current.resume();
-    }
-  }, [cancelPlay, setReplyInputBlocked]);
+      replyStructuredRef.current = null;
+      replySegmentsRef.current = [];
+      replyAbortRef.current = false;
+      replyTurnEndedRef.current = false;
+
+      recStreamRef.current = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+      recCtxRef.current = new AudioContext({
+        sampleRate: TARGET_PCM_SAMPLE_RATE,
+        latencyHint: "interactive",
+      });
+      recSampleRateRef.current = recCtxRef.current.sampleRate;
+      await recCtxRef.current.audioWorklet.addModule(getPcmRecorderWorkletUrl());
+      recNodeRef.current = new AudioWorkletNode(recCtxRef.current, "pcm-recorder-processor");
+      const source = recCtxRef.current.createMediaStreamSource(recStreamRef.current);
+      source.connect(recNodeRef.current);
+      const silentGain = recCtxRef.current.createGain();
+      silentGain.gain.value = 0;
+      recNodeRef.current.connect(silentGain);
+      silentGain.connect(recCtxRef.current.destination);
+
+      try {
+        const replyWs = await ensureReplySessionForQuestion(questionIndex);
+        if (isSocketOpen(replyWs)) {
+          startTurn(replyWs, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
+          sendPcm(replyWs, silentPcmChunk());
+          liveStreamActiveRef.current = true;
+        }
+      } catch {
+        liveStreamActiveRef.current = false;
+      }
+
+      recNodeRef.current.port.onmessage = (event) => {
+        if (!(event.data instanceof ArrayBuffer) || recordingPausedRef.current) return;
+        const raw = new Int16Array(event.data.slice(0));
+        const chunk =
+          recSampleRateRef.current !== TARGET_PCM_SAMPLE_RATE
+            ? resamplePcm16(raw, recSampleRateRef.current, TARGET_PCM_SAMPLE_RATE)
+            : raw;
+        pcmPartsRef.current.push(chunk as Int16Array);
+
+        if (liveStreamActiveRef.current && isSocketOpen(replyWsRef.current)) {
+          try {
+            sendPcm(replyWsRef.current!, chunk as Int16Array);
+          } catch {
+            liveStreamActiveRef.current = false;
+          }
+        }
+      };
+      if (recCtxRef.current.state === "suspended") {
+        await recCtxRef.current.resume();
+      }
+    },
+    [cancelPlay, ensureReplySessionForQuestion, setReplyInputBlocked]
+  );
 
   const setAnswerRecordingPaused = useCallback((paused: boolean) => {
     recordingPausedRef.current = paused;
@@ -526,43 +608,56 @@ export function useQuestionnaireFlow() {
   }, []);
 
   /**
-   * Stop local recording, then call questionnaire-reply-agent with the full audio
-   * and wait until the agent returns a transcription.
+   * Stop local recording, end the live audio turn (or fallback-send full
+   * buffer), and wait for transcription. Keeps the reply session open so a
+   * no-speech retry can reuse it.
    */
-  const stopRecordingAndTranscribe = useCallback(async (): Promise<ReplyStructured | null> => {
-    recordingPausedRef.current = false;
-    stopMic();
+  const stopRecordingAndTranscribe = useCallback(
+    async (questionIndex: number): Promise<ReplyStructured | null> => {
+      recordingPausedRef.current = false;
+      stopMic();
 
-    const compressed = compressSilenceChunks(pcmPartsRef.current);
-    pcmPartsRef.current = compressed.parts;
-    const pcm = concatInt16(pcmPartsRef.current);
+      // Keep silence/pauses intact so the agent can detect ~0.8s quiet.
+      const pcm = concatInt16(pcmPartsRef.current);
 
-    if (pcm.length < MIN_ANSWER_SAMPLES) {
-      throw new Error("Recording too short. Speak longer, then stop.");
-    }
+      if (pcm.length < MIN_ANSWER_SAMPLES) {
+        throw new Error("Recording too short. Speak longer, then stop.");
+      }
 
-    if (pcmRms(pcm) < 180) {
-      throw new Error("Could not detect speech in the recording. Speak louder and try again.");
-    }
+      if (pcmRms(pcm) < 180) {
+        throw new Error("Could not detect speech in the recording. Speak louder and try again.");
+      }
 
-    replyStructuredRef.current = null;
-    replySegmentsRef.current = [];
-    replyAbortRef.current = false;
-    replyTurnEndedRef.current = false;
+      const wasLiveStreaming = liveStreamActiveRef.current;
+      liveStreamActiveRef.current = false;
 
-    const ws = await connectReplyLive();
-    if (!isSocketOpen(ws)) {
-      throw new Error("Reply agent session is not connected");
-    }
+      if (wasLiveStreaming && isSocketOpen(replyWsRef.current)) {
+        // Auto-append ~1.5s silence so agent can detect pause before end.
+        await sendTrailingSilence(replyWsRef.current!);
+        endTurn(replyWsRef.current!);
+      } else {
+        replyStructuredRef.current = null;
+        replySegmentsRef.current = [];
+        replyAbortRef.current = false;
+        replyTurnEndedRef.current = false;
 
-    startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
-    sendPcm(ws, silentPcmChunk());
-    await sleep(30);
-    await sendRecordedPcmStream(ws, pcm);
-    endTurn(ws);
+        const ws = await ensureReplySessionForQuestion(questionIndex);
+        if (!isSocketOpen(ws)) {
+          throw new Error("Reply agent session is not connected");
+        }
 
-    return waitForReplyQuiet();
-  }, [connectReplyLive, stopMic, waitForReplyQuiet]);
+        startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
+        sendPcm(ws, silentPcmChunk());
+        await sleep(30);
+        await sendRecordedPcmStream(ws, pcm);
+        await sendTrailingSilence(ws);
+        endTurn(ws);
+      }
+
+      return waitForReplyQuiet();
+    },
+    [ensureReplySessionForQuestion, stopMic, waitForReplyQuiet]
+  );
 
   useEffect(() => {
     return () => {

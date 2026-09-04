@@ -136,8 +136,10 @@ export function ConversationalControls({
   };
 
   const advanceOrComplete = async (nextIndex: number, language: string) => {
+    // Close previous question's reply WS before opening the next one.
+    stopQuestionnaireReplySession();
+
     if (nextIndex >= QUESTIONS.length) {
-      stopQuestionnaireReplySession();
       dispatch(completeQuestionnaire());
       toast.success("Questionnaire completed! You can now record the visit notes.");
       return;
@@ -158,6 +160,7 @@ export function ConversationalControls({
     setIsQuestionnaireStarting(true);
     try {
       dispatch(startQuestionnaire());
+      // playQuestion opens a fresh reply session while Q1 audio plays.
       await playCurrentQuestion(0, selectedLanguage);
     } catch (error) {
       stopQuestionnaireReplySession();
@@ -210,8 +213,8 @@ export function ConversationalControls({
       }
 
       const nextIndex = currentQuestionIndex + 1;
+      stopQuestionnaireReplySession();
       if (nextIndex >= QUESTIONS.length) {
-        stopQuestionnaireReplySession();
         dispatch(completeQuestionnaire());
         toast.success("Questionnaire completed! You can now record the visit notes.");
         return;
@@ -237,11 +240,12 @@ export function ConversationalControls({
       dispatch(setQuestionnaireStatus("Buffering..."));
 
       try {
-        const structured = await stopRecordingAndTranscribe();
+        const structured = await stopRecordingAndTranscribe(currentQuestionIndex);
         const english = structured?.english?.trim() || "";
         const original = structured?.original?.trim() || english;
 
         if (!english || isEmptyReply(structured)) {
+          // Keep the same reply session so a retry can reuse it.
           dispatch(setCurrentQuestionResponse(NO_SPEECH_DETECTED));
           dispatch(setCurrentResponseTranslated(null));
           dispatch(setQuestionnaireStatus("Ready to record your answer"));
@@ -276,7 +280,7 @@ export function ConversationalControls({
       dispatch(setRecordingAnswer(true));
       dispatch(setAnswerPaused(false));
       dispatch(setQuestionnaireStatus("Recording your answer..."));
-      await startRecording();
+      await startRecording(currentQuestionIndex);
     } catch (error) {
       dispatch(setRecordingAnswer(false));
       dispatch(setQuestionnaireStatus(""));
@@ -313,7 +317,7 @@ export function ConversationalControls({
           </label>
         </div>
         <Select
-          value={selectedLanguage || undefined}
+          value={selectedLanguage ?? ""}
           onValueChange={(value) => dispatch(setSelectedLanguage(value))}
           disabled={
             questionnaireStarted || questionnaireCompleted || conversationalModeStarted

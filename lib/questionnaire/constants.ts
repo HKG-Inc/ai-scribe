@@ -9,6 +9,8 @@ export const PCM_SEND_GAP_MS = 20;
 export const KEEP_SILENCE_CHUNKS = 10;
 export const EDGE_SILENCE_CHUNKS = 2;
 export const MIN_ANSWER_SAMPLES = 1600;
+/** Auto silence appended after stop so the agent can detect pause (~0.8s). */
+export const REPLY_TRAILING_SILENCE_MS = 1500;
 export const REPLY_QUIET_MS = 1800;
 export const REPLY_MAX_WAIT_MS = 10000;
 export const PROTOCOL_VERSION = 2;

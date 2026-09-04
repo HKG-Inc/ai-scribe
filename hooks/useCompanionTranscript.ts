@@ -135,7 +135,9 @@ export function useCompanionTranscript(
         },
         onFrame: handleFrame,
         onError: (message) => {
-          console.error("[companion-relay]", message);
+          // Socket error often appears before close/reconnect cycle; keep logs quieter.
+          if (message === "Companion relay socket error") return;
+          console.warn("[companion-relay]", message);
         },
       },
     });
