@@ -137,31 +137,14 @@ export default function PricingPage() {
       helpPayload.append("subject", "AI Scribe Call Me Request");
       helpPayload.append("description", description);
 
-      const [helpResponse, callResponse] = await Promise.all([
-        apiFetch("/api/help/contact", {
-          method: "POST",
-          body: helpPayload,
-        }),
-        apiFetch("/api/bland-call", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            phone_number: phoneNumber,
-            request_data: {
-              email: activeFormData.workEmail,
-              name: activeFormData.fullName,
-            },
-          }),
-        }),
-      ]);
+      const helpResponse = await apiFetch("/api/help/contact", {
+        method: "POST",
+        body: helpPayload,
+      });
 
       if (!helpResponse.ok) {
         const errorData = await helpResponse.json().catch(() => ({}));
         throw new Error(errorData.error || "Failed to submit request. Please try again.");
-      }
-
-      if (!callResponse.ok) {
-        console.warn("Call request could not be queued, but support was notified by email.");
       }
 
       toast.success("Thank you! We will call you shortly.", {
