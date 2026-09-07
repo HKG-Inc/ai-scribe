@@ -1,6 +1,6 @@
 export const MRI_OCR_AGENT = "mri-report-ocr-agent";
 export const MRI_SUMMARY_AGENT = "mri-clinical-summary-agent";
-export const MRI_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+export const MRI_MAX_TOTAL_BYTES = 25 * 1024 * 1024;
 
 export interface MriFinding {
   pathology: string;

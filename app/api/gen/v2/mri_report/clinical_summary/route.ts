@@ -104,7 +104,7 @@ function payloadTooLargeResponse(): NextResponse {
   return NextResponse.json(
     {
       status: "error",
-      message: "Total upload size exceeds 16 MB limit",
+      message: "Total upload size exceeds 25 MB limit",
     },
     { status: 400 }
   );

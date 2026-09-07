@@ -38,7 +38,7 @@ export default function UploadMRIButton() {
     try {
       const totalBytes = [...mriFiles, ...files].reduce((sum, file) => sum + file.size, 0);
       if (totalBytes > MAX_FILE_SIZE) {
-        throw new Error("Total upload size exceeds 16 MB limit");
+        throw new Error("Total upload size exceeds 25 MB limit");
       }
 
       const formData = new FormData();
@@ -114,7 +114,7 @@ export default function UploadMRIButton() {
 
     files.forEach((file) => {
       if (file.size > MAX_FILE_SIZE) {
-        invalidFiles.push(`${file.name} (exceeds 16MB)`);
+        invalidFiles.push(`${file.name} (exceeds 25MB)`);
       } else if (existingFilenames.includes(file.name)) {
         duplicateFiles.push(file.name);
       } else {
@@ -123,7 +123,7 @@ export default function UploadMRIButton() {
     });
 
     if (invalidFiles.length > 0) {
-      toast.error(`The following files exceed 16MB limit:\n${invalidFiles.join("\n")}`);
+      toast.error(`The following files exceed 25MB limit:\n${invalidFiles.join("\n")}`);
     }
     if (duplicateFiles.length > 0) {
       toast.error(`The following files are already uploaded:\n${duplicateFiles.join("\n")}`);

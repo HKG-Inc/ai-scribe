@@ -82,7 +82,7 @@ export default function PricingPage() {
     workEmail: user.email || "",
     countryCode: extractedCountryCode,
     phoneNumber: user.phone
-      ? user.phone.replace(extractedCountryCode, "").replace(/\D/g, "")
+      ? user.phone.replace(extractedCountryCode, "").replace(/\D/g, "").slice(0, 10)
       : "",
   };
 
@@ -116,6 +116,11 @@ export default function PricingPage() {
     const fullNameError = getPersonNameError(activeFormData.fullName, "Full name");
     if (fullNameError) {
       toast.error(fullNameError);
+      return;
+    }
+
+    if (!/^\d{10}$/.test(activeFormData.phoneNumber)) {
+      toast.error("Phone number must be exactly 10 digits");
       return;
     }
 
@@ -376,11 +381,20 @@ export default function PricingPage() {
                       <Phone className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
                       <input
                         id="phoneNumber"
+                        type="tel"
+                        inputMode="numeric"
+                        autoComplete="tel-national"
+                        maxLength={10}
                         placeholder="Enter your phone number"
                         className="pl-10 h-10 rounded-xl border border-slate-200 w-full text-sm"
                         required
                         value={activeFormData.phoneNumber}
-                        onChange={(e) => handleInputChange("phoneNumber", e.target.value.replace(/\D/g, ""))}
+                        onChange={(e) =>
+                          handleInputChange(
+                            "phoneNumber",
+                            e.target.value.replace(/\D/g, "").slice(0, 10)
+                          )
+                        }
                         disabled={isSubmitting}
                       />
                     </div>
