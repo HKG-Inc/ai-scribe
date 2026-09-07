@@ -210,8 +210,7 @@ export function ConversationalControls({
     let nextIndex = -1;
 
     try {
-      // Stop local audio immediately; send end + drain in background on the same WS
-      // (playQuestion awaits turn_complete before starting the next question).
+      // Instant silence + drop play WS (standby kept so next Q can start without mint wait).
       await cancelPlay({ settle: false });
       dispatch(setRecordingAnswer(false));
       dispatch(setAnswerPaused(false));

@@ -50,12 +50,14 @@ export function useQuestionnaireFlow() {
   const playAbortRef = useRef<AbortController | null>(null);
   const playEpochRef = useRef(0);
   const playTurnActiveRef = useRef(false);
-  /** True after Skip/interrupt until turn_complete (or timeout) on the play WS. */
-  const playDrainNeededRef = useRef(false);
-  /** Shared drain so Skip can return immediately while playQuestion awaits the same mark. */
-  const playDrainPromiseRef = useRef<Promise<void> | null>(null);
+  /** Bumped when the active play WS is dropped so in-flight active mints abort. */
+  const audioConnectGenRef = useRef(0);
   const audioWsRef = useRef<WebSocket | null>(null);
   const audioSessionRef = useRef<LiveSessionInfo | null>(null);
+  /** Pre-connected spare play session — promoted on Skip to avoid mint latency. */
+  const standbyWsRef = useRef<WebSocket | null>(null);
+  const standbySessionRef = useRef<LiveSessionInfo | null>(null);
+  const standbyWarmPromiseRef = useRef<Promise<void> | null>(null);
   const replyWsRef = useRef<WebSocket | null>(null);
   const replySessionRef = useRef<LiveSessionInfo | null>(null);
   /** Question index this reply WS belongs to; reused for no-speech / replay. */
@@ -103,137 +105,203 @@ export function useQuestionnaireFlow() {
     playTurnActiveRef.current = false;
   }, []);
 
-  /**
-   * Wait until the play agent signals the interrupted turn is done
-   * (turn_complete / end) — the mark that it is safe to start the next question
-   * on the same WebSocket. Idempotent: concurrent callers share one promise.
-   */
-  const ensurePlayDrain = useCallback((ws: WebSocket): Promise<void> => {
-    if (playDrainPromiseRef.current) {
-      return playDrainPromiseRef.current;
-    }
-
-    playDrainPromiseRef.current = new Promise<void>((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        ws.removeEventListener("message", onDrainMessage);
-        playTurnActiveRef.current = false;
-        playDrainNeededRef.current = false;
-        playDrainPromiseRef.current = null;
-        if (playerNodeRef.current) {
-          playerNodeRef.current.port.postMessage({ command: "reset" });
-        }
-        resolve();
-      };
-
-      const onDrainMessage = (event: MessageEvent) => {
-        // Drop leftover TTS while draining so it cannot reach the next play.
-        if (typeof event.data !== "string") {
-          if (playerNodeRef.current) {
-            playerNodeRef.current.port.postMessage({ command: "reset" });
-          }
-          return;
-        }
-        try {
-          const frame = JSON.parse(event.data) as {
-            type?: string;
-            finished?: boolean;
-          };
-          if (
-            frame.type === "turn_complete" ||
-            frame.type === "end" ||
-            frame.finished === true
-          ) {
-            finish();
-          }
-        } catch {
-          // ignore non-JSON
-        }
-      };
-
-      ws.addEventListener("message", onDrainMessage);
-      // Safety net if the agent never emits the completion mark.
-      const timer = setTimeout(finish, 1200);
-    });
-
-    return playDrainPromiseRef.current;
+  const discardStandby = useCallback(() => {
+    disconnectLive(standbyWsRef.current);
+    standbyWsRef.current = null;
+    standbySessionRef.current = null;
+    standbyWarmPromiseRef.current = null;
   }, []);
 
   /**
-   * Stop local playback.
-   * - settle:false (Skip): instant silence, send end, drain in background, keep WS.
-   * - settle:true (before next play): await turn_complete mark, then reuse same WS.
+   * Pre-mint + connect a spare play WS while the current question plays so
+   * Skip can promote it instead of waiting on a fresh session mint.
    */
-  const cancelPlay = useCallback(
-    async (options?: { settle?: boolean }) => {
-      const wasActive =
-        playTurnActiveRef.current ||
-        !!playAbortRef.current ||
-        playDrainNeededRef.current;
-      const ws = audioWsRef.current;
-      const settle = options?.settle !== false;
-
-      // Silence immediately, before waiting on the agent.
-      if (playerNodeRef.current) {
-        playerNodeRef.current.port.postMessage({ command: "reset" });
-      }
-      if (typeof window !== "undefined" && window.speechSynthesis) {
-        window.speechSynthesis.cancel();
-      }
-
-      // Attach drain + send end BEFORE bumping epoch so we do not miss turn_complete.
-      if (wasActive && isSocketOpen(ws) && !playDrainNeededRef.current) {
-        try {
-          endTurn(ws!);
-        } catch {
-          // ignore
-        }
-        playDrainNeededRef.current = true;
-        void ensurePlayDrain(ws!);
-      }
-
-      playEpochRef.current += 1;
-      playAbortRef.current?.abort();
-      playAbortRef.current = null;
-
-      if (!settle) {
-        // UI can advance immediately; playQuestion will await the same drain.
-        return;
-      }
-
-      if (playDrainNeededRef.current && isSocketOpen(ws)) {
-        await ensurePlayDrain(ws!);
-        return;
-      }
-
-      playTurnActiveRef.current = false;
-      playDrainNeededRef.current = false;
-    },
-    [ensurePlayDrain]
-  );
-
-  const ensureAudioLive = useCallback(async (agentSlug: string) => {
-    if (isSocketOpen(audioWsRef.current) && audioSessionRef.current) {
-      return audioWsRef.current!;
+  const warmPlayStandby = useCallback(async () => {
+    if (isSocketOpen(standbyWsRef.current) && standbySessionRef.current) {
+      return;
+    }
+    if (standbyWarmPromiseRef.current) {
+      return standbyWarmPromiseRef.current;
     }
 
-    disconnectLive(audioWsRef.current);
-    audioWsRef.current = null;
+    const promise = (async () => {
+      try {
+        const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_PLAY_AGENT);
+        if (isSocketOpen(standbyWsRef.current)) return;
+        const ws = await connectLiveSocket(session);
+        if (isSocketOpen(standbyWsRef.current)) {
+          disconnectLive(ws);
+          return;
+        }
+        // Active socket may have been replaced; spare is still useful for next Skip.
+        standbySessionRef.current = session;
+        standbyWsRef.current = ws;
+        ws.addEventListener("close", () => {
+          if (standbyWsRef.current === ws) {
+            standbyWsRef.current = null;
+            standbySessionRef.current = null;
+          }
+        });
+      } catch {
+        // Best effort — next ensureAudioLive will mint on demand.
+      } finally {
+        if (standbyWarmPromiseRef.current === promise) {
+          standbyWarmPromiseRef.current = null;
+        }
+      }
+    })();
 
-    const session = await mintQuestionnaireLiveSession(agentSlug);
-    audioSessionRef.current = session;
-    const ws = await connectLiveSocket(session);
+    standbyWarmPromiseRef.current = promise;
+    return promise;
+  }, []);
+
+  const promoteStandby = useCallback((): WebSocket | null => {
+    if (!isSocketOpen(standbyWsRef.current) || !standbySessionRef.current) {
+      return null;
+    }
+    const ws = standbyWsRef.current;
     audioWsRef.current = ws;
+    audioSessionRef.current = standbySessionRef.current;
+    standbyWsRef.current = null;
+    standbySessionRef.current = null;
     ws.addEventListener("close", () => {
       if (audioWsRef.current === ws) {
         audioWsRef.current = null;
       }
     });
+    // Refill the spare while this session is used.
+    void warmPlayStandby();
     return ws;
+  }, [warmPlayStandby]);
+
+  /**
+   * Stop local playback.
+   * - settle:false (Skip): instant silence + drop active play WS (standby kept for speed).
+   * - settle:true: stop in-flight play; reuse open socket when still valid.
+   */
+  const cancelPlay = useCallback(async (options?: { settle?: boolean }) => {
+    const wasActive = playTurnActiveRef.current || !!playAbortRef.current;
+    const settle = options?.settle !== false;
+
+    if (playerNodeRef.current) {
+      playerNodeRef.current.port.postMessage({ command: "reset" });
+    }
+    if (typeof window !== "undefined" && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+
+    playEpochRef.current += 1;
+    playAbortRef.current?.abort();
+    playAbortRef.current = null;
+
+    if (!settle) {
+      // Drop the streaming socket so prior Q audio/text cannot leak.
+      if (wasActive || isSocketOpen(audioWsRef.current)) {
+        audioConnectGenRef.current += 1;
+        disconnectLive(audioWsRef.current);
+        audioWsRef.current = null;
+        audioSessionRef.current = null;
+      }
+      playTurnActiveRef.current = false;
+      return;
+    }
+
+    if (wasActive && isSocketOpen(audioWsRef.current)) {
+      try {
+        endTurn(audioWsRef.current);
+      } catch {
+        // ignore
+      }
+      // Brief wait so a late end is less likely to hit the next listener.
+      await new Promise<void>((resolve) => {
+        const ws = audioWsRef.current;
+        if (!ws) {
+          resolve();
+          return;
+        }
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          ws.removeEventListener("message", onMsg);
+          playTurnActiveRef.current = false;
+          resolve();
+        };
+        const onMsg = (event: MessageEvent) => {
+          if (typeof event.data !== "string") return;
+          try {
+            const frame = JSON.parse(event.data) as {
+              type?: string;
+              finished?: boolean;
+            };
+            if (
+              frame.type === "turn_complete" ||
+              frame.type === "end" ||
+              frame.finished === true
+            ) {
+              finish();
+            }
+          } catch {
+            // ignore
+          }
+        };
+        ws.addEventListener("message", onMsg);
+        const timer = setTimeout(finish, 300);
+      });
+      return;
+    }
+
+    playTurnActiveRef.current = false;
   }, []);
+
+  const ensureAudioLive = useCallback(
+    async (agentSlug: string) => {
+      if (isSocketOpen(audioWsRef.current) && audioSessionRef.current) {
+        void warmPlayStandby();
+        return audioWsRef.current!;
+      }
+
+      // Skip path: use pre-warmed spare when available (avoids mint latency).
+      let promoted = promoteStandby();
+      if (promoted) {
+        return promoted;
+      }
+
+      // Spare still connecting — wait for it instead of starting a second mint.
+      if (standbyWarmPromiseRef.current) {
+        await standbyWarmPromiseRef.current;
+        promoted = promoteStandby();
+        if (promoted) {
+          return promoted;
+        }
+      }
+
+      const connectGeneration = audioConnectGenRef.current;
+      disconnectLive(audioWsRef.current);
+      audioWsRef.current = null;
+
+      const session = await mintQuestionnaireLiveSession(agentSlug);
+      if (connectGeneration !== audioConnectGenRef.current) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      audioSessionRef.current = session;
+      const ws = await connectLiveSocket(session);
+      if (connectGeneration !== audioConnectGenRef.current) {
+        disconnectLive(ws);
+        throw new DOMException("Aborted", "AbortError");
+      }
+      audioWsRef.current = ws;
+      ws.addEventListener("close", () => {
+        if (audioWsRef.current === ws) {
+          audioWsRef.current = null;
+        }
+      });
+      void warmPlayStandby();
+      return ws;
+    },
+    [promoteStandby, warmPlayStandby]
+  );
 
   const rememberReplySegment = useCallback((found: ReplyStructured) => {
     if (!hasUsableReply(found)) return;
@@ -777,6 +845,7 @@ export function useQuestionnaireFlow() {
       disconnectLive(audioWsRef.current);
       audioWsRef.current = null;
       audioSessionRef.current = null;
+      discardStandby();
 
       playerNodeRef.current?.disconnect();
       playerNodeRef.current = null;
@@ -788,7 +857,7 @@ export function useQuestionnaireFlow() {
         });
       }
     };
-  }, [cancelPlay, stopMic, stopQuestionnaireReplySession]);
+  }, [cancelPlay, discardStandby, stopMic, stopQuestionnaireReplySession]);
 
   return {
     playQuestion,
