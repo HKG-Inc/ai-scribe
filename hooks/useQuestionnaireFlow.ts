@@ -65,6 +65,19 @@ export function useQuestionnaireFlow() {
   /** Question index this reply WS belongs to; reused for no-speech / replay. */
   const replyQuestionIndexRef = useRef<number | null>(null);
   const replyConnectPromiseRef = useRef<Promise<WebSocket> | null>(null);
+  /** True while we intentionally close reply WS (question change / unmount). */
+  const replyExpectCloseRef = useRef(false);
+  /** Live audio turn open until endTurn (or abort) — drives silent reconnect. */
+  const replyNeedsLiveRef = useRef(false);
+  /** Mic capture currently running (false once Stop begins). */
+  const replyMicActiveRef = useRef(false);
+  /** Monotonic id per reply live socket; newer session output replaces older. */
+  const replyLiveGenerationRef = useRef(0);
+  /** Generation whose tool/text output currently owns replyStructuredRef. */
+  const replyAcceptedGenerationRef = useRef(0);
+  const replyReconnectPromiseRef = useRef<Promise<WebSocket> | null>(null);
+  /** True while replaying buffered PCM onto a freshly minted reply live. */
+  const replyCatchingUpRef = useRef(false);
   const playerCtxRef = useRef<AudioContext | null>(null);
   const playerNodeRef = useRef<AudioWorkletNode | null>(null);
   const recCtxRef = useRef<AudioContext | null>(null);
@@ -309,8 +322,18 @@ export function useQuestionnaireFlow() {
   );
 
   const rememberReplySegment = useCallback(
-    (found: ReplyStructured, priority: number) => {
+    (found: ReplyStructured, priority: number, generation: number) => {
       if (!hasUsableReply(found) || priority <= 0) return;
+      if (generation < replyAcceptedGenerationRef.current) return;
+
+      // Newer live session wins — replace any provisional output from the old one.
+      if (generation > replyAcceptedGenerationRef.current) {
+        replyAcceptedGenerationRef.current = generation;
+        replyPriorityRef.current = 0;
+        replySegmentsRef.current = [];
+        replyStructuredRef.current = null;
+        replyTurnEndedRef.current = false;
+      }
 
       // Lower-priority sources (e.g. emit_transcription) lose once a better one arrives.
       if (priority < replyPriorityRef.current) return;
@@ -340,24 +363,31 @@ export function useQuestionnaireFlow() {
   );
 
   const handleReplyEvent = useCallback(
-    (parsed: Record<string, unknown>) => {
+    (parsed: Record<string, unknown>, generation: number) => {
       // Only hard turn markers — data frames often set finished:true per chunk and
       // must not end the wait early (especially before set_model_response arrives).
-      if (parsed.type === "end" || parsed.type === "turn_complete") {
+      if (
+        generation >= replyAcceptedGenerationRef.current &&
+        (parsed.type === "end" || parsed.type === "turn_complete")
+      ) {
         replyTurnEndedRef.current = true;
       }
 
       const found = extractStructured(parsed);
       const priority = replyEventPriority(parsed);
       if (found && priority > 0) {
-        rememberReplySegment(found, priority);
+        rememberReplySegment(found, priority, generation);
       }
     },
     [rememberReplySegment]
   );
 
+  const reconnectReplyLiveRef = useRef<
+    ((questionIndex: number) => Promise<WebSocket>) | null
+  >(null);
+
   const attachReplySocketHandlers = useCallback(
-    (ws: WebSocket) => {
+    (ws: WebSocket, generation: number) => {
       const onMessage = (event: MessageEvent) => {
         void (async () => {
           let payload: string | ArrayBuffer = event.data;
@@ -366,7 +396,7 @@ export function useQuestionnaireFlow() {
           }
           const parsed = parseLiveEvent(payload);
           if (parsed.binary) return;
-          handleReplyEvent(parsed as Record<string, unknown>);
+          handleReplyEvent(parsed as Record<string, unknown>, generation);
         })();
       };
 
@@ -375,22 +405,136 @@ export function useQuestionnaireFlow() {
         ws.removeEventListener("message", onMessage);
         if (replyWsRef.current === ws) {
           replyWsRef.current = null;
+          replySessionRef.current = null;
         }
+
+        // Intentional teardown (skip / next / unmount) — do not remint.
+        if (replyExpectCloseRef.current) return;
+        // Turn already finalized on this live — keep any provisional output.
+        if (!replyNeedsLiveRef.current) return;
+
+        const questionIndex = replyQuestionIndexRef.current;
+        if (questionIndex == null) return;
+
+        liveStreamActiveRef.current = false;
+        void reconnectReplyLiveRef.current?.(questionIndex).catch(() => {
+          // Silent — stopRecordingAndTranscribe will surface failures.
+        });
       });
     },
     [handleReplyEvent]
   );
 
+  const reconnectReplyLive = useCallback(
+    async (questionIndex: number): Promise<WebSocket> => {
+      if (
+        replyQuestionIndexRef.current === questionIndex &&
+        replyReconnectPromiseRef.current
+      ) {
+        return replyReconnectPromiseRef.current;
+      }
+
+      const promise = (async () => {
+        liveStreamActiveRef.current = false;
+        replyCatchingUpRef.current = true;
+
+        if (!isSocketOpen(replyWsRef.current)) {
+          replyWsRef.current = null;
+          replySessionRef.current = null;
+        }
+
+        const generation = ++replyLiveGenerationRef.current;
+        replyQuestionIndexRef.current = questionIndex;
+
+        // Fresh mint — do not reuse the expired session_id.
+        const session = await mintQuestionnaireLiveSession(
+          QUESTIONNAIRE_REPLY_AGENT
+        );
+        if (
+          replyExpectCloseRef.current ||
+          replyQuestionIndexRef.current !== questionIndex
+        ) {
+          throw new Error("Reply reconnect aborted");
+        }
+
+        const ws = await connectLiveSocket(session);
+        if (
+          replyExpectCloseRef.current ||
+          replyQuestionIndexRef.current !== questionIndex
+        ) {
+          disconnectLive(ws);
+          throw new Error("Reply reconnect aborted");
+        }
+
+        replySessionRef.current = session;
+        replyWsRef.current = ws;
+        attachReplySocketHandlers(ws, generation);
+
+        startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
+        sendPcm(ws, silentPcmChunk());
+
+        // Pass every buffered chunk (incl. speech during the dead gap) to the new live.
+        let sentThrough = 0;
+        const flushBuffered = async () => {
+          while (sentThrough < pcmPartsRef.current.length) {
+            if (!isSocketOpen(ws)) {
+              throw new Error("Reply live closed during reconnect replay");
+            }
+            const chunk = pcmPartsRef.current[sentThrough]!;
+            sentThrough += 1;
+            sendPcm(ws, chunk);
+            if (sentThrough % 50 === 0) {
+              await sleep(0);
+            }
+          }
+        };
+
+        await flushBuffered();
+        await flushBuffered();
+
+        // Resume live mic streaming only if the user is still recording.
+        if (replyMicActiveRef.current && replyNeedsLiveRef.current) {
+          liveStreamActiveRef.current = true;
+          await flushBuffered();
+          replyCatchingUpRef.current = false;
+          await flushBuffered();
+        } else {
+          replyCatchingUpRef.current = false;
+        }
+        return ws;
+      })();
+
+      replyReconnectPromiseRef.current = promise;
+      try {
+        return await promise;
+      } finally {
+        if (replyReconnectPromiseRef.current === promise) {
+          replyReconnectPromiseRef.current = null;
+        }
+        replyCatchingUpRef.current = false;
+      }
+    },
+    [attachReplySocketHandlers]
+  );
+
+  reconnectReplyLiveRef.current = reconnectReplyLive;
+
   /** Close reply-agent session (Next / Skip / complete / unmount). */
   const stopQuestionnaireReplySession = useCallback(() => {
+    replyExpectCloseRef.current = true;
+    replyNeedsLiveRef.current = false;
+    replyMicActiveRef.current = false;
     replyInputBlockedRef.current = false;
     recordingPausedRef.current = false;
     liveStreamActiveRef.current = false;
+    replyCatchingUpRef.current = false;
     replyConnectPromiseRef.current = null;
+    replyReconnectPromiseRef.current = null;
     replyQuestionIndexRef.current = null;
     disconnectLive(replyWsRef.current);
     replyWsRef.current = null;
     replySessionRef.current = null;
+    replyExpectCloseRef.current = false;
   }, []);
 
   /**
@@ -410,19 +554,32 @@ export function useQuestionnaireFlow() {
 
       if (
         replyQuestionIndexRef.current === questionIndex &&
+        replyReconnectPromiseRef.current
+      ) {
+        return replyReconnectPromiseRef.current;
+      }
+
+      if (
+        replyQuestionIndexRef.current === questionIndex &&
         replyConnectPromiseRef.current
       ) {
         return replyConnectPromiseRef.current;
       }
 
       // Different question (or missing) — close previous session.
+      replyExpectCloseRef.current = true;
+      replyNeedsLiveRef.current = false;
       disconnectLive(replyWsRef.current);
       replyWsRef.current = null;
       replySessionRef.current = null;
+      replyExpectCloseRef.current = false;
       replyQuestionIndexRef.current = questionIndex;
 
       const connectPromise = (async () => {
-        const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_REPLY_AGENT);
+        const generation = ++replyLiveGenerationRef.current;
+        const session = await mintQuestionnaireLiveSession(
+          QUESTIONNAIRE_REPLY_AGENT
+        );
         if (replyQuestionIndexRef.current !== questionIndex) {
           throw new Error("Reply session aborted for newer question");
         }
@@ -433,7 +590,7 @@ export function useQuestionnaireFlow() {
           throw new Error("Reply session aborted for newer question");
         }
         replyWsRef.current = ws;
-        attachReplySocketHandlers(ws);
+        attachReplySocketHandlers(ws, generation);
         return ws;
       })();
 
@@ -468,134 +625,178 @@ export function useQuestionnaireFlow() {
 
       await ensurePlayer();
       abortIfNeeded();
-      playerNodeRef.current?.port.postMessage({ command: "reset" });
 
       const prompt = buildPlayAgentPrompt(
         languageNameForPrompt(language, languageLabel(language)),
         question.text_en
       );
 
-      const ws = await ensureAudioLive(QUESTIONNAIRE_PLAY_AGENT);
-      abortIfNeeded();
-
       let translatedText = language === PARENT_LANGUAGE ? question.text_en : "";
-      const myEpoch = playEpochRef.current;
-      let heardOutput = false;
-      // Ignore any stray frames until we have sent THIS question's prompt.
-      let turnStarted = false;
 
-      playTurnActiveRef.current = true;
+      const runPlayTurn = async (): Promise<string> => {
+        abortIfNeeded();
+        playerNodeRef.current?.port.postMessage({ command: "reset" });
 
-      await new Promise<void>((resolve, reject) => {
-        let settled = false;
-        const timeout = setTimeout(() => finishResolve(), 25000);
+        // Drop a dead socket so ensureAudioLive mints fresh (idle expiry / mid-play close).
+        if (!isSocketOpen(audioWsRef.current)) {
+          audioWsRef.current = null;
+          audioSessionRef.current = null;
+        }
 
-        const finishResolve = () => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          ws.removeEventListener("message", onMessage);
-          notifyPlaySettled();
-          resolve();
-        };
+        const ws = await ensureAudioLive(QUESTIONNAIRE_PLAY_AGENT);
+        abortIfNeeded();
 
-        const finishReject = (error: Error) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          ws.removeEventListener("message", onMessage);
-          // Keep playTurnActive true so cancelPlay can drain the interrupted turn
-          // when the socket is still open; soft-cancel clears it after disconnect.
-          if (!signal.aborted) {
+        const myEpoch = playEpochRef.current;
+        let heardOutput = false;
+        // Ignore any stray frames until we have sent THIS question's prompt.
+        let turnStarted = false;
+
+        playTurnActiveRef.current = true;
+
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const timeout = setTimeout(() => finishResolve(), 25000);
+
+          const finishResolve = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            ws.removeEventListener("message", onMessage);
+            ws.removeEventListener("close", onClose);
             notifyPlaySettled();
-          }
-          reject(error);
-        };
+            resolve();
+          };
 
-        const isCurrent = () =>
-          !signal.aborted && playEpochRef.current === myEpoch;
-
-        const onMessage = (event: MessageEvent) => {
-          if (!isCurrent() || !turnStarted) {
-            return;
-          }
-
-          void (async () => {
-            let payload: string | ArrayBuffer = event.data;
-            if (payload instanceof Blob) {
-              payload = await payload.arrayBuffer();
+          const finishReject = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            ws.removeEventListener("message", onMessage);
+            ws.removeEventListener("close", onClose);
+            // Keep playTurnActive true so cancelPlay can drain the interrupted turn
+            // when the socket is still open; soft-cancel clears it after disconnect.
+            if (!signal.aborted) {
+              notifyPlaySettled();
             }
-            if (!isCurrent() || !turnStarted) return;
+            reject(error);
+          };
 
-            const parsed = parseLiveEvent(payload);
-            if (parsed.binary && playerNodeRef.current) {
-              heardOutput = true;
-              playerNodeRef.current.port.postMessage(parsed.binary, [parsed.binary]);
+          const isCurrent = () =>
+            !signal.aborted && playEpochRef.current === myEpoch;
+
+          const onClose = () => {
+            if (!isCurrent() || settled) return;
+            // Idle/mid-play expiry: only force a full replay when translation is missing.
+            if (translatedText.trim()) {
+              finishResolve();
+              return;
+            }
+            finishReject(new Error("Play live closed before translation"));
+          };
+
+          const onMessage = (event: MessageEvent) => {
+            if (!isCurrent() || !turnStarted) {
               return;
             }
 
-            if (
-              parsed.type === "data" &&
-              parsed.modality === "text" &&
-              parsed.partial !== true &&
-              typeof parsed.content === "string"
-            ) {
-              const text = normalizePlayTranslation(parsed.content);
-              const source = parsed.source || "";
-              if (
-                text &&
-                source !== "input_transcription" &&
-                (source === "output" || source === "output_transcription" || !source)
-              ) {
-                // Prefer the cleaner/longer translation if multiple text frames arrive.
-                if (
-                  translatedText &&
-                  source === "output_transcription" &&
-                  translatedText.length >= text.length
-                ) {
-                  heardOutput = true;
-                  return;
-                }
-                heardOutput = true;
-                translatedText = text;
-                onTranslatedText?.(text);
+            void (async () => {
+              let payload: string | ArrayBuffer = event.data;
+              if (payload instanceof Blob) {
+                payload = await payload.arrayBuffer();
               }
-            }
+              if (!isCurrent() || !turnStarted) return;
 
-            if (
-              parsed.type === "turn_complete" ||
-              parsed.type === "end" ||
-              parsed.finished === true
-            ) {
-              // Late end from a skipped turn can arrive before this turn's audio.
-              // Ignore until we have heard output for THIS play.
-              if (!heardOutput) return;
-              finishResolve();
-            }
-          })();
-        };
+              const parsed = parseLiveEvent(payload);
+              if (parsed.binary && playerNodeRef.current) {
+                heardOutput = true;
+                playerNodeRef.current.port.postMessage(parsed.binary, [
+                  parsed.binary,
+                ]);
+                return;
+              }
 
-        if (signal.aborted || playEpochRef.current !== myEpoch) {
-          finishReject(new DOMException("Aborted", "AbortError"));
-          return;
-        }
+              if (
+                parsed.type === "data" &&
+                parsed.modality === "text" &&
+                parsed.partial !== true &&
+                typeof parsed.content === "string"
+              ) {
+                const text = normalizePlayTranslation(parsed.content);
+                const source = parsed.source || "";
+                if (
+                  text &&
+                  source !== "input_transcription" &&
+                  (source === "output" ||
+                    source === "output_transcription" ||
+                    !source)
+                ) {
+                  // Prefer the cleaner/longer translation if multiple text frames arrive.
+                  if (
+                    translatedText &&
+                    source === "output_transcription" &&
+                    translatedText.length >= text.length
+                  ) {
+                    heardOutput = true;
+                    return;
+                  }
+                  heardOutput = true;
+                  translatedText = text;
+                  onTranslatedText?.(text);
+                }
+              }
 
-        ws.addEventListener("message", onMessage);
-        startTurn(ws, "text");
-        sendText(ws, prompt);
-        endTurn(ws);
-        turnStarted = true;
+              if (
+                parsed.type === "turn_complete" ||
+                parsed.type === "end" ||
+                parsed.finished === true
+              ) {
+                // Late end from a skipped turn can arrive before this turn's audio.
+                // Ignore until we have heard output for THIS play.
+                if (!heardOutput) return;
+                finishResolve();
+              }
+            })();
+          };
 
-        signal.addEventListener(
-          "abort",
-          () => {
+          if (signal.aborted || playEpochRef.current !== myEpoch) {
             finishReject(new DOMException("Aborted", "AbortError"));
-          },
-          { once: true }
-        );
-      });
+            return;
+          }
 
-      return translatedText;
+          ws.addEventListener("message", onMessage);
+          ws.addEventListener("close", onClose);
+          startTurn(ws, "text");
+          sendText(ws, prompt);
+          endTurn(ws);
+          turnStarted = true;
+
+          signal.addEventListener(
+            "abort",
+            () => {
+              finishReject(new DOMException("Aborted", "AbortError"));
+            },
+            { once: true }
+          );
+        });
+
+        return translatedText;
+      };
+
+      try {
+        return await runPlayTurn();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        // Already have translation (or English seed text) — do not re-speak.
+        if (translatedText.trim()) {
+          return translatedText;
+        }
+        // Mid-question drop with no translation: remint and play once more.
+        audioConnectGenRef.current += 1;
+        disconnectLive(audioWsRef.current);
+        audioWsRef.current = null;
+        audioSessionRef.current = null;
+        return await runPlayTurn();
+      }
     },
     [ensureAudioLive, ensurePlayer, notifyPlaySettled]
   );
@@ -683,6 +884,9 @@ export function useQuestionnaireFlow() {
       pcmPartsRef.current = [];
       liveSilenceGateRef.current.reset();
       liveStreamActiveRef.current = false;
+      replyMicActiveRef.current = false;
+      replyNeedsLiveRef.current = false;
+      replyCatchingUpRef.current = false;
 
       replyStructuredRef.current = null;
       replySegmentsRef.current = [];
@@ -714,13 +918,18 @@ export function useQuestionnaireFlow() {
 
       try {
         const replyWs = await ensureReplySessionForQuestion(questionIndex);
+        replyAcceptedGenerationRef.current = replyLiveGenerationRef.current;
         if (isSocketOpen(replyWs)) {
           startTurn(replyWs, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
           sendPcm(replyWs, silentPcmChunk());
+          replyNeedsLiveRef.current = true;
+          replyMicActiveRef.current = true;
           liveStreamActiveRef.current = true;
         }
       } catch {
         liveStreamActiveRef.current = false;
+        replyNeedsLiveRef.current = false;
+        replyMicActiveRef.current = true;
       }
 
       recNodeRef.current.port.onmessage = (event) => {
@@ -732,7 +941,11 @@ export function useQuestionnaireFlow() {
             : raw;
         pcmPartsRef.current.push(chunk as Int16Array);
 
-        if (liveStreamActiveRef.current && isSocketOpen(replyWsRef.current)) {
+        if (
+          liveStreamActiveRef.current &&
+          !replyCatchingUpRef.current &&
+          isSocketOpen(replyWsRef.current)
+        ) {
           try {
             // Drop long mid-utterance pauses; trailing silence is sent on Stop.
             if (
@@ -825,6 +1038,10 @@ export function useQuestionnaireFlow() {
    *
    * Mid-utterance pauses are trimmed; language hint + trailing silence are
    * sent before endTurn so ASR keeps native script and can finalize.
+   *
+   * If the live died mid-answer, wait for silent reconnect (full PCM replay)
+   * then finalize on the new session — provisional session-1 output is kept
+   * until session-2 tool/text output replaces it.
    */
   const stopRecordingAndTranscribe = useCallback(
     async (
@@ -832,6 +1049,8 @@ export function useQuestionnaireFlow() {
       language: string
     ): Promise<ReplyStructured | null> => {
       recordingPausedRef.current = false;
+      replyMicActiveRef.current = false;
+      liveStreamActiveRef.current = false;
       stopMic();
 
       // Compress mid-speech pauses; intentional quiet is appended via sendTrailingSilence.
@@ -839,50 +1058,62 @@ export function useQuestionnaireFlow() {
       const pcm = concatInt16(speechParts);
 
       if (pcm.length < MIN_ANSWER_SAMPLES) {
+        replyNeedsLiveRef.current = false;
         throw new Error("Recording too short. Speak longer, then stop.");
       }
 
       if (pcmRms(pcm) < 180) {
+        replyNeedsLiveRef.current = false;
         throw new Error("Could not detect speech in the recording. Speak louder and try again.");
       }
-
-      const wasLiveStreaming = liveStreamActiveRef.current;
-      liveStreamActiveRef.current = false;
 
       const languageHint = buildReplyLanguageHint(
         language,
         languageNameForPrompt(language, languageLabel(language))
       );
 
-      if (wasLiveStreaming && isSocketOpen(replyWsRef.current)) {
-        // Language hint → trailing silence → endTurn (order matters for ASR script).
-        sendText(replyWsRef.current!, languageHint);
-        await sendTrailingSilence(replyWsRef.current!);
-        endTurn(replyWsRef.current!);
+      const finalizeOnLive = async (ws: WebSocket) => {
+        sendText(ws, languageHint);
+        await sendTrailingSilence(ws);
+        endTurn(ws);
+        replyNeedsLiveRef.current = false;
+      };
+
+      // Wait for in-flight silent reconnect; if the socket is already dead, remint.
+      try {
+        if (replyReconnectPromiseRef.current) {
+          await replyReconnectPromiseRef.current;
+        } else if (!isSocketOpen(replyWsRef.current) && replyNeedsLiveRef.current) {
+          await reconnectReplyLive(questionIndex);
+        }
+      } catch {
+        // Fall through to full-buffer path below.
+      }
+
+      if (isSocketOpen(replyWsRef.current)) {
+        // Live path (original or reconnected): audio already on the wire.
+        await finalizeOnLive(replyWsRef.current!);
       } else {
-        replyStructuredRef.current = null;
-        replySegmentsRef.current = [];
-        replyPriorityRef.current = 0;
+        // Keep provisional session-1 output until this live's tool/text replaces it.
         replyAbortRef.current = false;
-        replyTurnEndedRef.current = false;
 
         const ws = await ensureReplySessionForQuestion(questionIndex);
         if (!isSocketOpen(ws)) {
+          replyNeedsLiveRef.current = false;
           throw new Error("Reply agent session is not connected");
         }
 
+        replyNeedsLiveRef.current = true;
         startTurn(ws, "audio", `audio/pcm;rate=${TARGET_PCM_SAMPLE_RATE}`);
         sendPcm(ws, silentPcmChunk());
         await sleep(30);
         await sendRecordedPcmStream(ws, pcm);
-        sendText(ws, languageHint);
-        await sendTrailingSilence(ws);
-        endTurn(ws);
+        await finalizeOnLive(ws);
       }
 
       return waitForReplyQuiet();
     },
-    [ensureReplySessionForQuestion, stopMic, waitForReplyQuiet]
+    [ensureReplySessionForQuestion, reconnectReplyLive, stopMic, waitForReplyQuiet]
   );
 
   useEffect(() => {
