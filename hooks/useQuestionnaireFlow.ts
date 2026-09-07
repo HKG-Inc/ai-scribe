@@ -14,6 +14,7 @@ import {
   REPLY_MAX_WAIT_MS,
   REPLY_QUIET_MS,
   buildPlayAgentPrompt,
+  buildReplyLanguageHint,
   languageNameForPrompt,
 } from "@/lib/questionnaire/constants";
 import {
@@ -611,9 +612,16 @@ export function useQuestionnaireFlow() {
    * Stop local recording, end the live audio turn (or fallback-send full
    * buffer), and wait for transcription. Keeps the reply session open so a
    * no-speech retry can reuse it.
+   *
+   * Before trailing silence / endTurn, send a language hint so the reply
+   * agent transcribes in native script (e.g. Telugu) instead of Latin
+   * transliteration.
    */
   const stopRecordingAndTranscribe = useCallback(
-    async (questionIndex: number): Promise<ReplyStructured | null> => {
+    async (
+      questionIndex: number,
+      language: string
+    ): Promise<ReplyStructured | null> => {
       recordingPausedRef.current = false;
       stopMic();
 
@@ -631,8 +639,14 @@ export function useQuestionnaireFlow() {
       const wasLiveStreaming = liveStreamActiveRef.current;
       liveStreamActiveRef.current = false;
 
+      const languageHint = buildReplyLanguageHint(
+        language,
+        languageNameForPrompt(language, languageLabel(language))
+      );
+
       if (wasLiveStreaming && isSocketOpen(replyWsRef.current)) {
-        // Auto-append ~1.5s silence so agent can detect pause before end.
+        // Language hint → trailing silence → endTurn (order matters for ASR script).
+        sendText(replyWsRef.current!, languageHint);
         await sendTrailingSilence(replyWsRef.current!);
         endTurn(replyWsRef.current!);
       } else {
@@ -650,6 +664,7 @@ export function useQuestionnaireFlow() {
         sendPcm(ws, silentPcmChunk());
         await sleep(30);
         await sendRecordedPcmStream(ws, pcm);
+        sendText(ws, languageHint);
         await sendTrailingSilence(ws);
         endTurn(ws);
       }

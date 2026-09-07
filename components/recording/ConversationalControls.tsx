@@ -240,7 +240,13 @@ export function ConversationalControls({
       dispatch(setQuestionnaireStatus("Buffering..."));
 
       try {
-        const structured = await stopRecordingAndTranscribe(currentQuestionIndex);
+        if (!selectedLanguage) {
+          throw new Error("Please select a language first");
+        }
+        const structured = await stopRecordingAndTranscribe(
+          currentQuestionIndex,
+          selectedLanguage
+        );
         const english = structured?.english?.trim() || "";
         const original = structured?.original?.trim() || english;
 

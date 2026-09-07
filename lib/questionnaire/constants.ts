@@ -25,3 +25,11 @@ export function languageNameForPrompt(code: string, label?: string): string {
 export function buildPlayAgentPrompt(languageName: string, englishQuestion: string): string {
   return `Translate to ${languageName}: ${englishQuestion}`;
 }
+
+/** Hint sent on Stop before trailing silence / endTurn so ASR keeps native script. */
+export function buildReplyLanguageHint(languageCode: string, languageName: string): string {
+  return (
+    `The patient is responding in ${languageName} (${languageCode}). ` +
+    "Listen carefully and transcribe exactly what is said in the audio."
+  );
+}
