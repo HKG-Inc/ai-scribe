@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PARENT_LANGUAGE,
   QUESTIONS,
@@ -13,6 +13,7 @@ import {
   MIN_ANSWER_SAMPLES,
   REPLY_MAX_WAIT_MS,
   REPLY_QUIET_MS,
+  REPLY_WARM_DELAY_MS,
   buildPlayAgentPrompt,
   buildReplyLanguageHint,
   languageNameForPrompt,
@@ -34,6 +35,7 @@ import {
   mintQuestionnaireLiveSession,
   parseLiveEvent,
   pcmRms,
+  releaseLiveSession,
   resamplePcm16,
   isLiveSessionAbortError,
   sendPcm,
@@ -50,6 +52,7 @@ import {
 } from "@/lib/questionnaire/live-client";
 
 export function useQuestionnaireFlow() {
+  const [isPlayConnecting, setIsPlayConnecting] = useState(false);
   const playAbortRef = useRef<AbortController | null>(null);
   const playEpochRef = useRef(0);
   const playTurnActiveRef = useRef(false);
@@ -79,6 +82,10 @@ export function useQuestionnaireFlow() {
   const replyReconnectPromiseRef = useRef<Promise<WebSocket> | null>(null);
   /** True while replaying buffered PCM onto a freshly minted reply live. */
   const replyCatchingUpRef = useRef(false);
+  /** Debounced reply pre-mint after the user stays on a question. */
+  const replyWarmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Question index we already scheduled/completed a reply warm for (one mint max). */
+  const replyWarmForQuestionRef = useRef<number | null>(null);
   const playerCtxRef = useRef<AudioContext | null>(null);
   const playerNodeRef = useRef<AudioWorkletNode | null>(null);
   const recCtxRef = useRef<AudioContext | null>(null);
@@ -179,43 +186,9 @@ export function useQuestionnaireFlow() {
   );
 
   /**
-   * Pre-mint + connect a spare play WS while the current question plays so
-   * Skip can promote it instead of waiting on a fresh session mint.
+   * Promote a pre-warmed spare play WS if one exists (optional fast path).
+   * Standby is no longer auto-minted after every question (stream cap).
    */
-  const warmPlayStandby = useCallback(async () => {
-    if (isSocketOpen(standbyWsRef.current) && standbySessionRef.current) {
-      return;
-    }
-    if (standbyWarmPromiseRef.current) {
-      return standbyWarmPromiseRef.current;
-    }
-
-    const promise = (async () => {
-      try {
-        const session = await mintQuestionnaireLiveSession(QUESTIONNAIRE_PLAY_AGENT);
-        if (isSocketOpen(standbyWsRef.current)) return;
-        const ws = await connectLiveSocket(session);
-        if (isSocketOpen(standbyWsRef.current)) {
-          disconnectLive(ws);
-          return;
-        }
-        // Active socket may have been replaced; spare is still useful for next Skip.
-        standbySessionRef.current = session;
-        standbyWsRef.current = ws;
-        attachPlaySocketGuards(ws);
-      } catch {
-        // Best effort — next ensureAudioLive will mint on demand.
-      } finally {
-        if (standbyWarmPromiseRef.current === promise) {
-          standbyWarmPromiseRef.current = null;
-        }
-      }
-    })();
-
-    standbyWarmPromiseRef.current = promise;
-    return promise;
-  }, [attachPlaySocketGuards]);
-
   const promoteStandby = useCallback((): WebSocket | null => {
     if (!isSocketOpen(standbyWsRef.current) || !standbySessionRef.current) {
       return null;
@@ -225,14 +198,13 @@ export function useQuestionnaireFlow() {
     audioSessionRef.current = standbySessionRef.current;
     standbyWsRef.current = null;
     standbySessionRef.current = null;
-    // Guards already attached while standby; refill spare for next Skip.
-    void warmPlayStandby();
     return ws;
-  }, [warmPlayStandby]);
+  }, []);
 
   /**
    * Stop local playback.
-   * - settle:false (Skip): instant silence + drop active play WS (standby kept for speed).
+   * - settle:false (Skip): instant silence + drop active play WS; invalidate
+   *   in-flight standby mints so Skip spam cannot stack live streams.
    * - settle:true: stop in-flight play; reuse open socket when still valid.
    */
   const cancelPlay = useCallback(async (options?: { settle?: boolean }) => {
@@ -251,9 +223,14 @@ export function useQuestionnaireFlow() {
     playAbortRef.current = null;
 
     if (!settle) {
-      // Drop the streaming socket so prior Q audio/text cannot leak.
+      // Invalidate in-flight play/standby mints; keep one open standby if present.
+      audioConnectGenRef.current += 1;
+      standbyWarmPromiseRef.current = null;
+      if (replyWarmTimerRef.current) {
+        clearTimeout(replyWarmTimerRef.current);
+        replyWarmTimerRef.current = null;
+      }
       if (wasActive || isSocketOpen(audioWsRef.current)) {
-        audioConnectGenRef.current += 1;
         disconnectLive(audioWsRef.current);
         audioWsRef.current = null;
         audioSessionRef.current = null;
@@ -314,45 +291,39 @@ export function useQuestionnaireFlow() {
   const ensureAudioLive = useCallback(
     async (agentSlug: string) => {
       if (isSocketOpen(audioWsRef.current) && audioSessionRef.current) {
-        void warmPlayStandby();
         return audioWsRef.current!;
       }
 
-      // Skip path: use pre-warmed spare when available (avoids mint latency).
-      let promoted = promoteStandby();
-      if (promoted) {
-        return promoted;
-      }
-
-      // Spare still connecting — wait for it instead of starting a second mint.
-      if (standbyWarmPromiseRef.current) {
-        await standbyWarmPromiseRef.current;
-        promoted = promoteStandby();
+      setIsPlayConnecting(true);
+      try {
+        const promoted = promoteStandby();
         if (promoted) {
           return promoted;
         }
-      }
 
-      const connectGeneration = audioConnectGenRef.current;
-      disconnectLive(audioWsRef.current);
-      audioWsRef.current = null;
+        const connectGeneration = audioConnectGenRef.current;
+        disconnectLive(audioWsRef.current);
+        audioWsRef.current = null;
 
-      const session = await mintQuestionnaireLiveSession(agentSlug);
-      if (connectGeneration !== audioConnectGenRef.current) {
-        throw new DOMException("Aborted", "AbortError");
+        const session = await mintQuestionnaireLiveSession(agentSlug);
+        if (connectGeneration !== audioConnectGenRef.current) {
+          await releaseLiveSession(session);
+          throw new DOMException("Aborted", "AbortError");
+        }
+        audioSessionRef.current = session;
+        const ws = await connectLiveSocket(session);
+        if (connectGeneration !== audioConnectGenRef.current) {
+          disconnectLive(ws);
+          throw new DOMException("Aborted", "AbortError");
+        }
+        audioWsRef.current = ws;
+        attachPlaySocketGuards(ws);
+        return ws;
+      } finally {
+        setIsPlayConnecting(false);
       }
-      audioSessionRef.current = session;
-      const ws = await connectLiveSocket(session);
-      if (connectGeneration !== audioConnectGenRef.current) {
-        disconnectLive(ws);
-        throw new DOMException("Aborted", "AbortError");
-      }
-      audioWsRef.current = ws;
-      attachPlaySocketGuards(ws);
-      void warmPlayStandby();
-      return ws;
     },
-    [attachPlaySocketGuards, promoteStandby, warmPlayStandby]
+    [attachPlaySocketGuards, promoteStandby]
   );
 
   const rememberReplySegment = useCallback(
@@ -505,6 +476,7 @@ export function useQuestionnaireFlow() {
           replyExpectCloseRef.current ||
           replyQuestionIndexRef.current !== questionIndex
         ) {
+          await releaseLiveSession(session);
           throw new Error("Reply reconnect aborted");
         }
 
@@ -570,8 +542,17 @@ export function useQuestionnaireFlow() {
 
   reconnectReplyLiveRef.current = reconnectReplyLive;
 
+  const cancelReplyWarm = useCallback(() => {
+    if (replyWarmTimerRef.current) {
+      clearTimeout(replyWarmTimerRef.current);
+      replyWarmTimerRef.current = null;
+    }
+  }, []);
+
   /** Close reply-agent session (Next / Skip / complete / unmount). */
   const stopQuestionnaireReplySession = useCallback(() => {
+    cancelReplyWarm();
+    replyWarmForQuestionRef.current = null;
     replyExpectCloseRef.current = true;
     replyNeedsLiveRef.current = false;
     replyMicActiveRef.current = false;
@@ -581,17 +562,19 @@ export function useQuestionnaireFlow() {
     replyCatchingUpRef.current = false;
     replyConnectPromiseRef.current = null;
     replyReconnectPromiseRef.current = null;
+    // Invalidate in-flight mint/connect so Skip does not leave a live stream open.
     replyQuestionIndexRef.current = null;
     disconnectLive(replyWsRef.current);
     replyWsRef.current = null;
     replySessionRef.current = null;
     replyExpectCloseRef.current = false;
-  }, []);
+  }, [cancelReplyWarm]);
 
   /**
    * Ensure a reply-agent live WS for this question.
    * - Same question (no-speech retry / replay): reuse open session.
    * - New question: mint a fresh session and connect (no session_id reuse).
+   * Minted-but-aborted sessions are released to avoid stream_cap_exceeded.
    */
   const ensureReplySessionForQuestion = useCallback(
     async (questionIndex: number): Promise<WebSocket> => {
@@ -632,6 +615,7 @@ export function useQuestionnaireFlow() {
           QUESTIONNAIRE_REPLY_AGENT
         );
         if (replyQuestionIndexRef.current !== questionIndex) {
+          await releaseLiveSession(session);
           throw new Error("Reply session aborted for newer question");
         }
         replySessionRef.current = session;
@@ -648,6 +632,19 @@ export function useQuestionnaireFlow() {
       replyConnectPromiseRef.current = connectPromise;
       try {
         return await connectPromise;
+      } catch (error) {
+        // Don't leave a stale index that blocks a later Record mint, or looks "warmed".
+        if (
+          replyQuestionIndexRef.current === questionIndex &&
+          !isSocketOpen(replyWsRef.current)
+        ) {
+          replyQuestionIndexRef.current = null;
+          replySessionRef.current = null;
+          if (replyWarmForQuestionRef.current === questionIndex) {
+            replyWarmForQuestionRef.current = null;
+          }
+        }
+        throw error;
       } finally {
         if (replyConnectPromiseRef.current === connectPromise) {
           replyConnectPromiseRef.current = null;
@@ -655,6 +652,54 @@ export function useQuestionnaireFlow() {
       }
     },
     [attachReplySocketHandlers]
+  );
+
+  /**
+   * After the user stays on a question (play settled), mint reply live once.
+   * One warm per question index — rapid re-schedules do not mint again.
+   */
+  const scheduleReplyWarm = useCallback(
+    (questionIndex: number) => {
+      // Already scheduled, connecting, or live for this question — do not mint again.
+      if (replyWarmForQuestionRef.current === questionIndex) {
+        if (
+          replyWarmTimerRef.current ||
+          replyConnectPromiseRef.current ||
+          (replyQuestionIndexRef.current === questionIndex &&
+            isSocketOpen(replyWsRef.current))
+        ) {
+          return;
+        }
+      }
+
+      cancelReplyWarm();
+      replyWarmForQuestionRef.current = questionIndex;
+      replyWarmTimerRef.current = setTimeout(() => {
+        replyWarmTimerRef.current = null;
+        if (
+          replyQuestionIndexRef.current === questionIndex &&
+          isSocketOpen(replyWsRef.current)
+        ) {
+          return;
+        }
+        if (
+          replyQuestionIndexRef.current === questionIndex &&
+          replyConnectPromiseRef.current
+        ) {
+          return;
+        }
+        void ensureReplySessionForQuestion(questionIndex).catch(() => {
+          // Best effort — Record will mint on demand.
+          if (
+            replyWarmForQuestionRef.current === questionIndex &&
+            !isSocketOpen(replyWsRef.current)
+          ) {
+            replyWarmForQuestionRef.current = null;
+          }
+        });
+      }, REPLY_WARM_DELAY_MS);
+    },
+    [cancelReplyWarm, ensureReplySessionForQuestion]
   );
 
   const setReplyInputBlocked = useCallback((blocked: boolean) => {
@@ -879,6 +924,9 @@ export function useQuestionnaireFlow() {
         throw new Error("Question not found");
       }
 
+      // Do not mint reply on play start — only after settle + delay (or on Record).
+      cancelReplyWarm();
+
       // Settle any in-flight play so a late end cannot stop this question.
       const epochBeforeSettle = playEpochRef.current;
       await cancelPlay({ settle: true });
@@ -888,15 +936,10 @@ export function useQuestionnaireFlow() {
       }
       setReplyInputBlocked(true);
 
-      // Open reply-agent session while question audio plays so Record
-      // can stream immediately (reuse if same question / no-speech).
-      void ensureReplySessionForQuestion(questionIndex).catch(() => {
-        // Best effort; startRecording will retry.
-      });
-
       const controller = new AbortController();
       playAbortRef.current = controller;
       playEpochRef.current += 1;
+      const playEpoch = playEpochRef.current;
 
       let translatedText = "";
       const notifyTranslation = (text: string) => {
@@ -912,6 +955,15 @@ export function useQuestionnaireFlow() {
           controller.signal,
           notifyTranslation
         );
+        if (
+          !controller.signal.aborted &&
+          playEpochRef.current === playEpoch
+        ) {
+          // Reply warm only — do not also mint a play standby here.
+          // Standby + reply after every question looked like duplicate reply
+          // lives and burned the stream cap. Skip/next mint play on demand.
+          scheduleReplyWarm(questionIndex);
+        }
       } finally {
         if (playAbortRef.current === controller) {
           playAbortRef.current = null;
@@ -921,7 +973,13 @@ export function useQuestionnaireFlow() {
 
       return { translatedText };
     },
-    [cancelPlay, ensureReplySessionForQuestion, playViaAgent, setReplyInputBlocked]
+    [
+      cancelPlay,
+      cancelReplyWarm,
+      playViaAgent,
+      scheduleReplyWarm,
+      setReplyInputBlocked,
+    ]
   );
 
   const stopMic = useCallback(() => {
@@ -940,11 +998,11 @@ export function useQuestionnaireFlow() {
 
   /**
    * Start recording with live streaming to the reply-agent WebSocket.
-   * Session should already be open from playQuestion; we only start the
-   * audio turn and stream. PCM is also buffered for fallback resend.
+   * Prefers a reply session pre-warmed after play settle; otherwise mints now.
    */
   const startRecording = useCallback(
     async (questionIndex: number) => {
+      cancelReplyWarm();
       await cancelPlay({ settle: true });
       setReplyInputBlocked(false);
       recordingPausedRef.current = false;
@@ -1032,7 +1090,12 @@ export function useQuestionnaireFlow() {
         await recCtxRef.current.resume();
       }
     },
-    [cancelPlay, ensureReplySessionForQuestion, setReplyInputBlocked]
+    [
+      cancelPlay,
+      cancelReplyWarm,
+      ensureReplySessionForQuestion,
+      setReplyInputBlocked,
+    ]
   );
 
   const setAnswerRecordingPaused = useCallback((paused: boolean) => {
@@ -1212,5 +1275,7 @@ export function useQuestionnaireFlow() {
     stopRecordingAndTranscribe,
     stopQuestionnaireReplySession,
     setAnswerRecordingPaused,
+    /** True while play-agent live mint/connect is in flight. */
+    isPlayConnecting,
   };
 }

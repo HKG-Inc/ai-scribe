@@ -464,6 +464,19 @@ export async function connectLiveSocket(session: LiveSessionInfo): Promise<WebSo
   });
 }
 
+/**
+ * Mint counts against the project live-stream cap even before we use it.
+ * Auth + close so an aborted/superseded mint does not linger as an active stream.
+ */
+export async function releaseLiveSession(session: LiveSessionInfo): Promise<void> {
+  try {
+    const ws = await connectLiveSocket(session);
+    disconnectLive(ws);
+  } catch {
+    // Best effort — gateway may already have dropped the stream.
+  }
+}
+
 export function startTurn(
   ws: WebSocket,
   modality: "text" | "audio",

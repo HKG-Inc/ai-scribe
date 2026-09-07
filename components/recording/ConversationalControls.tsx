@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Languages, Loader2, Repeat1 } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -69,19 +69,60 @@ export function ConversationalControls({
     stopRecordingAndTranscribe,
     stopQuestionnaireReplySession,
     setAnswerRecordingPaused,
+    isPlayConnecting,
   } = useQuestionnaireFlow();
   const [isQuestionnaireStarting, setIsQuestionnaireStarting] = useState(false);
   const [isBufferingAnswer, setIsBufferingAnswer] = useState(false);
+  const [isAwaitingPlay, setIsAwaitingPlay] = useState(false);
+  const [isStartingRecord, setIsStartingRecord] = useState(false);
+  /** Only one button shows a spinner — the action that triggered work. */
+  const [loadingAction, setLoadingAction] = useState<
+    "start" | "next" | "replay" | "record" | null
+  >(null);
   const isBusyRef = useRef(false);
   /** Tracks index for rapid Skip before Redux re-renders. */
   const questionIndexRef = useRef(currentQuestionIndex);
   questionIndexRef.current = currentQuestionIndex;
   /** Bumped on Skip so a superseded play does not update UI after advance. */
   const playGenerationRef = useRef(0);
+  /** Coalesce rapid Skip so we only mint/play the latest question. */
+  const skipPlayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (skipPlayTimerRef.current) {
+        clearTimeout(skipPlayTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Drop the action spinner once that action's connect/debounce work is done.
+  useEffect(() => {
+    if (!loadingAction || loadingAction === "record") return;
+    if (isAwaitingPlay || isPlayConnecting) return;
+    setLoadingAction(null);
+  }, [isPlayConnecting, isAwaitingPlay, loadingAction]);
 
   const hasValidResponse =
     !!currentQuestionResponse && !isNoSpeechResponse(currentQuestionResponse);
   const canAdvanceToNext = hasValidResponse || isNoSpeechResponse(currentQuestionResponse);
+  const isPlayBusy =
+    isPlayConnecting || isAwaitingPlay || isQuestionnaireStarting;
+  const isRecordBusy = isStartingRecord || isBufferingAnswer;
+
+  const primaryActionDisabled =
+    !selectedLanguage ||
+    isRecordingAnswer ||
+    isAnswerPaused ||
+    isRecordBusy ||
+    isPlayBusy ||
+    questionnaireCompleted ||
+    (questionnaireStarted && !canAdvanceToNext);
+
+  const replayDisabled = isRecordingAnswer || isRecordBusy || isPlayBusy;
+  const recordDisabled = isRecordingAnswer
+    ? isBufferingAnswer
+    : isRecordBusy || hasValidResponse || isPlayBusy;
 
   if (isVisitRecording) return null;
 
@@ -90,6 +131,7 @@ export function ConversationalControls({
     if (!question) return;
 
     const generation = playGenerationRef.current;
+    setIsAwaitingPlay(false);
     dispatch(setCurrentQuestionTranslated(""));
     dispatch(setQuestionnaireStatus("Playing question..."));
     try {
@@ -176,10 +218,11 @@ export function ConversationalControls({
     if (isQuestionnaireStarting || isBusyRef.current) return;
 
     isBusyRef.current = true;
+    setLoadingAction("start");
+    setIsAwaitingPlay(true);
     setIsQuestionnaireStarting(true);
     try {
       dispatch(startQuestionnaire());
-      // playQuestion opens a fresh reply session while Q1 audio plays.
       await playCurrentQuestion(0, selectedLanguage);
     } catch (error) {
       stopQuestionnaireReplySession();
@@ -188,6 +231,7 @@ export function ConversationalControls({
       toast.error(message);
     } finally {
       setIsQuestionnaireStarting(false);
+      setIsAwaitingPlay(false);
       isBusyRef.current = false;
     }
   };
@@ -199,9 +243,12 @@ export function ConversationalControls({
 
     const nextIndex = currentQuestionIndex + 1;
     isBusyRef.current = true;
+    setLoadingAction("next");
+    setIsAwaitingPlay(true);
     try {
       await advanceOrComplete(nextIndex, selectedLanguage);
     } finally {
+      setIsAwaitingPlay(false);
       isBusyRef.current = false;
     }
   };
@@ -215,7 +262,8 @@ export function ConversationalControls({
     let nextIndex = -1;
 
     try {
-      // Instant silence + drop play WS (standby kept so next Q can start without mint wait).
+      setIsAwaitingPlay(true);
+      // Instant silence + drop play WS; stop reply warm / in-flight reply connect.
       await cancelPlay({ settle: false });
       dispatch(setRecordingAnswer(false));
       dispatch(setAnswerPaused(false));
@@ -243,6 +291,12 @@ export function ConversationalControls({
       questionIndexRef.current = nextIndex;
       stopQuestionnaireReplySession();
       if (nextIndex >= QUESTIONS.length) {
+        if (skipPlayTimerRef.current) {
+          clearTimeout(skipPlayTimerRef.current);
+          skipPlayTimerRef.current = null;
+        }
+        setIsAwaitingPlay(false);
+        setLoadingAction(null);
         dispatch(completeQuestionnaire());
         dispatch(setCurrentQuestionResponse(""));
         dispatch(setCurrentQuestionTranslated(""));
@@ -258,12 +312,31 @@ export function ConversationalControls({
       isBusyRef.current = false;
     }
 
-    // Fire-and-forget: waiting here previously blocked continuous Skip.
-    void playCurrentQuestion(nextIndex, language);
+    // Debounce play: rapid Skip only mints/plays the latest index (stream cap).
+    if (skipPlayTimerRef.current) {
+      clearTimeout(skipPlayTimerRef.current);
+    }
+    const playIndex = nextIndex;
+    const playGeneration = playGenerationRef.current;
+    setIsAwaitingPlay(true);
+    skipPlayTimerRef.current = setTimeout(() => {
+      skipPlayTimerRef.current = null;
+      if (playGeneration !== playGenerationRef.current) {
+        setIsAwaitingPlay(false);
+        return;
+      }
+      if (playIndex !== questionIndexRef.current) {
+        setIsAwaitingPlay(false);
+        return;
+      }
+      void playCurrentQuestion(playIndex, language);
+    }, 250);
   };
 
   const handleReplay = () => {
     if (isRecordingAnswer || !selectedLanguage) return;
+    setLoadingAction("replay");
+    setIsAwaitingPlay(true);
     void playCurrentQuestion(currentQuestionIndex, selectedLanguage);
   };
 
@@ -317,18 +390,24 @@ export function ConversationalControls({
     if (hasValidResponse) return;
 
     try {
+      setLoadingAction("record");
+      setIsStartingRecord(true);
       dispatch(setCurrentQuestionResponse(""));
       dispatch(setCurrentResponseTranslated(null));
+      dispatch(setQuestionnaireStatus("Connecting..."));
+      await startRecording(currentQuestionIndex);
       dispatch(setRecordingAnswer(true));
       dispatch(setAnswerPaused(false));
       dispatch(setQuestionnaireStatus("Recording your answer..."));
-      await startRecording(currentQuestionIndex);
     } catch (error) {
       dispatch(setRecordingAnswer(false));
       dispatch(setQuestionnaireStatus(""));
       toast.error(
         error instanceof Error ? error.message : "Could not access microphone"
       );
+    } finally {
+      setIsStartingRecord(false);
+      setLoadingAction(null);
     }
   };
 
@@ -381,9 +460,8 @@ export function ConversationalControls({
       <div className="flex items-center gap-4 flex-wrap justify-center">
         {!questionnaireCompleted && questionnaireStarted && !isRecordingAnswer && !isAnswerPaused && (
             <button
-              className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg text-sm"
+              className="p-2 rounded-lg text-sm text-slate-400 hover:text-slate-600 hover:bg-slate-100"
               onClick={() => void handleSkip()}
-              disabled={isQuestionnaireStarting}
             >
               Skip
             </button>
@@ -398,41 +476,48 @@ export function ConversationalControls({
             }
             className={cn(
               "px-4 rounded-lg h-12 text-base font-medium shadow-sm transition-all flex items-center gap-2",
-              selectedLanguage && !questionnaireCompleted
-                ? "bg-sky-400 hover:bg-sky-500 text-white"
-                : "bg-slate-200 text-slate-400 cursor-not-allowed"
+              primaryActionDisabled
+                ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                : "bg-sky-400 hover:bg-sky-500 text-white"
             )}
-            disabled={
-              !selectedLanguage ||
-              isRecordingAnswer ||
-              isAnswerPaused ||
-              isBufferingAnswer ||
-              isQuestionnaireStarting ||
-              questionnaireCompleted ||
-              (questionnaireStarted && !canAdvanceToNext)
-            }
+            disabled={primaryActionDisabled}
           >
             {questionnaireStarted
               ? `Next Question (${currentQuestionIndex + 1}/${QUESTIONS.length})`
               : "Questionnaire"}
-            {isQuestionnaireStarting && <Loader2 className="h-4 w-4 animate-spin" />}
+            {(loadingAction === "start" || loadingAction === "next") &&
+              (isAwaitingPlay || isPlayConnecting) && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
           </button>
         )}
 
         {questionnaireStarted && (
           <button
             onClick={handleReplay}
-            className="px-2 hover:bg-purple-500 text-blue-500 hover:text-white bg-transparent rounded-lg h-8 text-xs font-medium flex items-center gap-1"
-            disabled={isRecordingAnswer || isBufferingAnswer}
+            className={cn(
+              "px-2 rounded-lg h-8 text-xs font-medium flex items-center gap-1",
+              replayDisabled
+                ? "text-slate-300 cursor-not-allowed bg-transparent"
+                : "hover:bg-purple-500 text-blue-500 hover:text-white bg-transparent"
+            )}
+            disabled={replayDisabled}
           >
             <Repeat1 className="h-4 w-4" /> Question
+            {loadingAction === "replay" &&
+              (isAwaitingPlay || isPlayConnecting) && (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              )}
           </button>
         )}
       </div>
 
       {(questionnaireStarted || questionnaireCompleted) && (
         <div className="flex space-x-4 items-center">
-          {questionnaireStarted && isRecordingAnswer && !isBufferingAnswer && (
+          {questionnaireStarted &&
+            isRecordingAnswer &&
+            !isBufferingAnswer &&
+            !isStartingRecord && (
             <button
               onClick={handlePauseResumeAnswer}
               className="px-4 bg-orange-400 hover:bg-orange-500 text-white rounded-lg h-12 text-base font-medium shadow-sm"
@@ -446,22 +531,24 @@ export function ConversationalControls({
               onClick={() => void handleRecordAnswer()}
               className={cn(
                 "px-4 rounded-lg h-12 text-base font-medium shadow-sm flex items-center gap-2 min-w-[160px] justify-center",
-                isBufferingAnswer
-                  ? "bg-sky-400 text-white cursor-wait"
-                  : isRecordingAnswer
-                    ? "bg-red-500 hover:bg-red-600 text-white"
-                    : hasValidResponse
-                      ? "bg-slate-200 text-slate-400"
+                recordDisabled && !isRecordingAnswer
+                  ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                  : isBufferingAnswer || isStartingRecord
+                    ? "bg-sky-400 text-white cursor-wait"
+                    : isRecordingAnswer
+                      ? "bg-red-500 hover:bg-red-600 text-white"
                       : "bg-brand-green hover:bg-opacity-90 text-white"
               )}
-              disabled={
-                isBufferingAnswer ||
-                (hasValidResponse && !isRecordingAnswer)
-              }
+              disabled={recordDisabled}
             >
               {isBufferingAnswer ? (
                 <>
                   Buffering...
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                </>
+              ) : isStartingRecord ? (
+                <>
+                  Connecting...
                   <Loader2 className="h-4 w-4 animate-spin" />
                 </>
               ) : isRecordingAnswer ? (
@@ -473,7 +560,12 @@ export function ConversationalControls({
           ) : questionnaireCompleted ? (
             <button
               onClick={onStartVisitNotes}
-              className="px-6 bg-brand-green hover:bg-opacity-90 text-white rounded-lg h-12 text-base font-medium shadow-lg flex items-center gap-2"
+              className={cn(
+                "px-6 rounded-lg h-12 text-base font-medium shadow-lg flex items-center gap-2",
+                isStartingVisitNotes
+                  ? "bg-slate-200 text-slate-400 cursor-not-allowed"
+                  : "bg-brand-green hover:bg-opacity-90 text-white"
+              )}
               disabled={isStartingVisitNotes}
             >
               ✓ Record Visit Notes
