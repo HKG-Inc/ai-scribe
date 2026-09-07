@@ -153,6 +153,8 @@ export async function POST(request: Request) {
 
     const status =
       message.includes("No extractable text") ||
+      message.includes("Could not extract text") ||
+      message.includes("MRI summary missing") ||
       message.includes("No valid MRI files")
         ? 400
         : 500;

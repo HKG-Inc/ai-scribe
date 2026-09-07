@@ -134,15 +134,26 @@ async function ocrScannedDoc(
 /**
  * Step 2–3: digital MuPDF text, or scanned → JPEG → OCR agent.
  * Opens each PDF once (no scan-check reopen for OCR path).
+ * If a "digital" PDF yields no usable text, fall back to OCR so the file is
+ * not silently dropped later in the pipeline.
  */
 export async function extractFileText(file: MriInputFile): Promise<string> {
   if (isPdfBytes(file.bytes)) {
     const doc = openPdfDocument(file.bytes);
     try {
+      if (doc.countPages() === 0) {
+        throw new Error(`PDF has no pages: ${file.filename}`);
+      }
       if (isScannedPdf(doc)) {
         return ocrScannedDoc(file.filename, doc);
       }
-      return extractTextFromDoc(doc);
+      const digital = extractTextFromDoc(doc).trim();
+      if (digital) return digital;
+
+      console.warn(
+        `[mri-pipeline] digital extract empty for ${file.filename}; falling back to OCR`
+      );
+      return ocrScannedDoc(file.filename, doc);
     } finally {
       doc.destroy();
     }
@@ -188,7 +199,8 @@ async function summarizeExtractedReport(file: {
     patient_label: data.patient_label,
     studies: data.studies.map((study) => ({
       ...study,
-      filename: study.filename?.trim() || file.filename,
+      // Always attribute to the uploaded file (ignore agent-supplied names).
+      filename: file.filename,
     })),
   };
 }
@@ -212,8 +224,7 @@ export async function generateMriClinicalSummary(
   const extractedResults = await Promise.all(
     files.map(async (file) => {
       const text = await extractFileText(file);
-      if (!text) return null;
-      return { filename: file.filename, text };
+      return { filename: file.filename, text: text.trim() };
     })
   );
   console.log(
@@ -222,13 +233,17 @@ export async function generateMriClinicalSummary(
 
   await authReady;
 
-  const extracted = extractedResults.filter(
-    (item): item is { filename: string; text: string } => item !== null
-  );
-
-  if (!extracted.length) {
-    throw new Error("No extractable text from uploaded MRI files");
+  const failedExtractions = extractedResults.filter((item) => !item.text);
+  if (failedExtractions.length) {
+    const names = failedExtractions.map((item) => item.filename).join(", ");
+    throw new Error(
+      failedExtractions.length === files.length
+        ? "No extractable text from uploaded MRI files"
+        : `Could not extract text from ${failedExtractions.length} of ${files.length} MRI file(s): ${names}`
+    );
   }
+
+  const extracted = extractedResults as Array<{ filename: string; text: string }>;
 
   const summaryStartedAt = performance.now();
   const summaries = await Promise.all(
@@ -241,6 +256,20 @@ export async function generateMriClinicalSummary(
   const studies = summaries.flatMap((summary) => summary.studies);
   if (!studies.length) {
     throw new Error("Summary agent returned no studies");
+  }
+
+  // Every uploaded file must produce at least one study — otherwise the UI
+  // shows N files but only N-1 responses (common with multi-file uploads).
+  const studyFilenames = new Set(
+    studies.map((study) => study.filename?.trim()).filter(Boolean)
+  );
+  const missingStudyFiles = files
+    .map((file) => file.filename)
+    .filter((filename) => !studyFilenames.has(filename));
+  if (missingStudyFiles.length) {
+    throw new Error(
+      `MRI summary missing for ${missingStudyFiles.length} file(s): ${missingStudyFiles.join(", ")}`
+    );
   }
 
   const patient_label =

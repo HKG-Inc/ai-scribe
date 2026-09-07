@@ -33,7 +33,7 @@ export default function UploadMRIButton() {
   const [isGeneratingReport, setIsGeneratingReport] = useState(false);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
 
-  const generateMRIClinicalSummary = async (files: File[]) => {
+  const generateMRIClinicalSummary = async (files: File[]): Promise<boolean> => {
     setIsGeneratingReport(true);
     try {
       const totalBytes = [...mriFiles, ...files].reduce((sum, file) => sum + file.size, 0);
@@ -66,16 +66,30 @@ export default function UploadMRIButton() {
         throw new Error("MRI clinical summary returned no studies");
       }
 
-      const taggedStudies = tagStudiesWithFilenames(
-        result.data.studies,
-        files.map((file) => file.name)
+      const uploadedNames = files.map((file) => file.name);
+      const taggedStudies = tagStudiesWithFilenames(result.data.studies, uploadedNames);
+
+      const studyFilenames = new Set(
+        taggedStudies.map((study) => study.filename?.trim()).filter(Boolean)
       );
+      const missingFiles = uploadedNames.filter((name) => !studyFilenames.has(name));
+      if (missingFiles.length) {
+        throw new Error(
+          `MRI summary missing for ${missingFiles.length} file(s): ${missingFiles.join(", ")}`
+        );
+      }
+
       dispatch(appendMriReport({ data: { studies: taggedStudies } }));
-      toast.success("MRI clinical summary generated successfully!");
+      setMriFiles((prev) => [...prev, ...files]);
+      toast.success(
+        `${files.length} file(s) processed — MRI clinical summary generated successfully!`
+      );
+      return true;
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Failed to generate MRI clinical summary"
       );
+      return false;
     } finally {
       setIsGeneratingReport(false);
     }
@@ -89,6 +103,7 @@ export default function UploadMRIButton() {
       toast.error(
         `Maximum ${MAX_FILES} files allowed. You can only add ${MAX_FILES - mriFiles.length} more file(s).`
       );
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
@@ -115,10 +130,10 @@ export default function UploadMRIButton() {
     }
 
     if (validFiles.length > 0) {
-      const summaryPromise = generateMRIClinicalSummary(validFiles);
-      setMriFiles((prev) => [...prev, ...validFiles]);
-      toast.success(`${validFiles.length} file(s) uploaded successfully`);
-      await summaryPromise;
+      // Only keep files in the preview list after summary succeeds — otherwise
+      // users see N uploaded files with only N-1 responses when generation fails
+      // or silently drops a file.
+      await generateMRIClinicalSummary(validFiles);
     }
 
     if (fileInputRef.current) {
