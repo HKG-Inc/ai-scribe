@@ -78,7 +78,17 @@ export function useQuestionnaireFlow() {
   const liveStreamActiveRef = useRef(false);
 
   const ensurePlayer = useCallback(async () => {
-    if (playerNodeRef.current) return;
+    if (playerNodeRef.current && playerCtxRef.current?.state !== "closed") {
+      return;
+    }
+
+    playerNodeRef.current?.disconnect();
+    playerNodeRef.current = null;
+    if (playerCtxRef.current && playerCtxRef.current.state !== "closed") {
+      void playerCtxRef.current.close().catch(() => {});
+    }
+    playerCtxRef.current = null;
+
     playerCtxRef.current = new AudioContext({ sampleRate: 24000 });
     await playerCtxRef.current.audioWorklet.addModule(getPcmPlayerWorkletUrl());
     playerNodeRef.current = new AudioWorkletNode(
@@ -565,9 +575,12 @@ export function useQuestionnaireFlow() {
     recNodeRef.current = null;
     recStreamRef.current?.getTracks().forEach((track) => track.stop());
     recStreamRef.current = null;
-    if (recCtxRef.current) {
-      void recCtxRef.current.close();
-      recCtxRef.current = null;
+    const recCtx = recCtxRef.current;
+    recCtxRef.current = null;
+    if (recCtx && recCtx.state !== "closed") {
+      void recCtx.close().catch(() => {
+        // Already closed (Strict Mode / overlapping stop).
+      });
     }
   }, []);
 
@@ -762,8 +775,17 @@ export function useQuestionnaireFlow() {
       stopMic();
       stopQuestionnaireReplySession();
       disconnectLive(audioWsRef.current);
-      if (playerCtxRef.current) {
-        void playerCtxRef.current.close();
+      audioWsRef.current = null;
+      audioSessionRef.current = null;
+
+      playerNodeRef.current?.disconnect();
+      playerNodeRef.current = null;
+      const playerCtx = playerCtxRef.current;
+      playerCtxRef.current = null;
+      if (playerCtx && playerCtx.state !== "closed") {
+        void playerCtx.close().catch(() => {
+          // Already closed (React Strict Mode remount).
+        });
       }
     };
   }, [cancelPlay, stopMic, stopQuestionnaireReplySession]);
