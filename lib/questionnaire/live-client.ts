@@ -230,9 +230,12 @@ export function extractStructured(event: Record<string, unknown>): ReplyStructur
 
 /** Whether a live WS frame should be treated as a questionnaire answer transcription. */
 export function shouldAcceptReplyEvent(event: Record<string, unknown>): boolean {
+  if (!event || typeof event !== "object") return false;
+
+  // Accept emit_transcription and ADK-synthesized set_model_response (from output_schema).
   if (event.type === "tool_call" || event.type === "function_call") {
     const name = event.name ?? event.tool;
-    return name === "emit_transcription";
+    return name === "emit_transcription" || name === "set_model_response";
   }
 
   if (
