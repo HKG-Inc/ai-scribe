@@ -37,7 +37,7 @@ import {
   sendRecordedPcmStream,
   sendText,
   sendTrailingSilence,
-  shouldAcceptReplyEvent,
+  replyEventPriority,
   silentPcmChunk,
   sleep,
   startTurn,
@@ -72,6 +72,8 @@ export function useQuestionnaireFlow() {
   const pcmPartsRef = useRef<Int16Array[]>([]);
   const replySegmentsRef = useRef<ReplyStructured[]>([]);
   const replyStructuredRef = useRef<ReplyStructured | null>(null);
+  /** Highest accepted reply source priority (set_model_response > emit_transcription > text). */
+  const replyPriorityRef = useRef(0);
   const replyAbortRef = useRef(false);
   const replyTurnEndedRef = useRef(false);
   /** Block mic while a question is playing (avoid question audio as input). */
@@ -303,22 +305,36 @@ export function useQuestionnaireFlow() {
     [promoteStandby, warmPlayStandby]
   );
 
-  const rememberReplySegment = useCallback((found: ReplyStructured) => {
-    if (!hasUsableReply(found)) return;
-    const last = replySegmentsRef.current[replySegmentsRef.current.length - 1];
-    if (last && last.original === found.original && last.english === found.english) {
-      return;
-    }
-    replySegmentsRef.current.push(found);
-    replyStructuredRef.current = replySegmentsRef.current.reduce(
-      (acc, seg) => ({
-        original: joinReplyText(acc.original, seg.original),
-        english: joinReplyText(acc.english, seg.english),
-        language: seg.language || acc.language,
-      }),
-      { original: "", english: "", language: "" }
-    );
-  }, []);
+  const rememberReplySegment = useCallback(
+    (found: ReplyStructured, priority: number) => {
+      if (!hasUsableReply(found) || priority <= 0) return;
+
+      // Lower-priority sources (e.g. emit_transcription) lose once a better one arrives.
+      if (priority < replyPriorityRef.current) return;
+
+      if (priority > replyPriorityRef.current) {
+        replyPriorityRef.current = priority;
+        replySegmentsRef.current = [found];
+        replyStructuredRef.current = found;
+        return;
+      }
+
+      const last = replySegmentsRef.current[replySegmentsRef.current.length - 1];
+      if (last && last.original === found.original && last.english === found.english) {
+        return;
+      }
+      replySegmentsRef.current.push(found);
+      replyStructuredRef.current = replySegmentsRef.current.reduce(
+        (acc, seg) => ({
+          original: joinReplyText(acc.original, seg.original),
+          english: joinReplyText(acc.english, seg.english),
+          language: seg.language || acc.language,
+        }),
+        { original: "", english: "", language: "" }
+      );
+    },
+    []
+  );
 
   const handleReplyEvent = useCallback(
     (parsed: Record<string, unknown>) => {
@@ -331,8 +347,9 @@ export function useQuestionnaireFlow() {
       }
 
       const found = extractStructured(parsed);
-      if (found && shouldAcceptReplyEvent(parsed)) {
-        rememberReplySegment(found);
+      const priority = replyEventPriority(parsed);
+      if (found && priority > 0) {
+        rememberReplySegment(found, priority);
       }
     },
     [rememberReplySegment]
@@ -667,6 +684,7 @@ export function useQuestionnaireFlow() {
 
       replyStructuredRef.current = null;
       replySegmentsRef.current = [];
+      replyPriorityRef.current = 0;
       replyAbortRef.current = false;
       replyTurnEndedRef.current = false;
 
@@ -815,6 +833,7 @@ export function useQuestionnaireFlow() {
       } else {
         replyStructuredRef.current = null;
         replySegmentsRef.current = [];
+        replyPriorityRef.current = 0;
         replyAbortRef.current = false;
         replyTurnEndedRef.current = false;
 

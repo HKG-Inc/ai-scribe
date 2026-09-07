@@ -228,13 +228,31 @@ export function extractStructured(event: Record<string, unknown>): ReplyStructur
   return null;
 }
 
+function replyToolName(event: Record<string, unknown>): string | null {
+  if (event.type !== "tool_call" && event.type !== "function_call") return null;
+  const name = event.name ?? event.tool;
+  return typeof name === "string" ? name : null;
+}
+
+/**
+ * Prefer ADK `set_model_response` (from output_schema) over `emit_transcription`
+ * and plain text output frames. Higher number wins.
+ */
+export function replyEventPriority(event: Record<string, unknown>): number {
+  if (!shouldAcceptReplyEvent(event)) return 0;
+  const name = replyToolName(event);
+  if (name === "set_model_response") return 3;
+  if (name === "emit_transcription") return 2;
+  return 1;
+}
+
 /** Whether a live WS frame should be treated as a questionnaire answer transcription. */
 export function shouldAcceptReplyEvent(event: Record<string, unknown>): boolean {
   if (!event || typeof event !== "object") return false;
 
   // Accept emit_transcription and ADK-synthesized set_model_response (from output_schema).
-  if (event.type === "tool_call" || event.type === "function_call") {
-    const name = event.name ?? event.tool;
+  const name = replyToolName(event);
+  if (name) {
     return name === "emit_transcription" || name === "set_model_response";
   }
 
