@@ -390,12 +390,15 @@ export default function RecordingPage() {
   const generateReportFromMessage = async (
     rawMessage: string,
     visitIdAtGeneration: string | null = null,
-    generationId = reportGenerationIdRef.current
+    generationId = reportGenerationIdRef.current,
+    options?: { formatTranscription?: boolean }
   ) => {
     const isStale = () =>
       generationId !== reportGenerationIdRef.current ||
       (visitIdAtGeneration != null &&
         store.getState().recording.visitId !== visitIdAtGeneration);
+
+    const shouldFormatTranscription = options?.formatTranscription !== false;
 
     const finishSection = (
       section: ReportSectionKey,
@@ -458,6 +461,11 @@ export default function RecordingPage() {
     });
 
     const runTranscriptionFormatter = async () => {
+      if (!shouldFormatTranscription) {
+        finishSection("transcription");
+        return;
+      }
+
       try {
         const formatterResponse = await apiFetch("/api/transcription-formatter", {
           method: "POST",
@@ -1006,7 +1014,10 @@ export default function RecordingPage() {
         return;
       }
 
-      // Questionnaire-only path: synthesize a transcript from Q&A for report agents.
+      // Questionnaire-only path: synthesize English Q&A for report agents only.
+      // Do NOT write it into `transcription` — the Transcription tab already
+      // renders qaHistory, and stuffing synthetic lines here duplicates content
+      // and pollutes later visit-note recordings.
       const effectiveTranscript =
         transcriptMessage ||
         qaHistory
@@ -1017,9 +1028,7 @@ export default function RecordingPage() {
           })
           .join("\n");
 
-      if (!transcriptMessage && hasQuestionnaireContent) {
-        dispatch(setTranscription(effectiveTranscript.split("\n").filter(Boolean)));
-      }
+      const hasVisitTranscript = Boolean(transcriptMessage);
 
       const phoneRestarted = () => reportGenerationIdRef.current !== stopGeneration;
 
@@ -1048,7 +1057,9 @@ export default function RecordingPage() {
       }
 
       const generationId = ++reportGenerationIdRef.current;
-      await generateReportFromMessage(effectiveTranscript, visitIdAtStop, generationId);
+      await generateReportFromMessage(effectiveTranscript, visitIdAtStop, generationId, {
+        formatTranscription: hasVisitTranscript,
+      });
     } finally {
       stoppingRef.current = false;
     }

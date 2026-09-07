@@ -34,10 +34,9 @@ import { getProcedureTypeBadge, getProcedureTypeBadgeClass } from "@/lib/procedu
 import {
   mapVisitNotesApiResponseToDisplay,
   qaHistoryToQuestionnaireResponses,
+  qaHistoryToEnglishTranscriptLines,
 } from "@/lib/questionnaire-visit-notes";
 import { formatReferralUrgency } from "@/lib/referrals";
-import { PatientAnswerDisplay } from "@/components/recording/PatientAnswerDisplay";
-import { isNoSpeechResponse } from "@/lib/conversation-mode";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
 import { toUserFacingApiError } from "@/lib/api-errors";
@@ -1740,82 +1739,93 @@ function TranscriptionTab() {
   const formattedTranscription = useAppSelector((s) => s.recording.formattedTranscription);
   const qaHistory = useAppSelector((s) => s.recording.qaHistory);
   const sectionLoading = useAppSelector((s) => s.recording.reportSectionLoading);
+  // Visit notes only — never reuse synthetic questionnaire lines as the visit transcript.
   const displayTranscription = formattedTranscription ?? transcription;
 
-  const speakerRows = displayTranscription
-    .map((line, index) => {
-      const doctorMatch = line.match(/^doctor\s*:\s*(.*)$/i);
-      if (doctorMatch) {
-        return { key: index, speaker: "Doctor", message: doctorMatch[1]?.trim() || "", tone: "doctor" as const };
-      }
+  type SpeakerRow = {
+    key: string;
+    speaker: string;
+    message: string;
+    tone: "doctor" | "patient";
+  };
 
-      const patientMatch = line.match(/^patient\s*:\s*(.*)$/i);
-      if (patientMatch) {
-        return { key: index, speaker: "Patient", message: patientMatch[1]?.trim() || "", tone: "patient" as const };
-      }
+  const toSpeakerRows = (lines: string[], keyPrefix: string): SpeakerRow[] =>
+    lines
+      .map((line, index) => {
+        const doctorMatch = line.match(/^doctor\s*:\s*(.*)$/i);
+        if (doctorMatch) {
+          return {
+            key: `${keyPrefix}-d-${index}`,
+            speaker: "Doctor",
+            message: doctorMatch[1]?.trim() || "",
+            tone: "doctor" as const,
+          };
+        }
 
-      return { key: index, speaker: "Doctor", message: line, tone: "doctor" as const };
-    })
-    .filter((row) => row.message.length > 0);
+        const patientMatch = line.match(/^patient\s*:\s*(.*)$/i);
+        if (patientMatch) {
+          return {
+            key: `${keyPrefix}-p-${index}`,
+            speaker: "Patient",
+            message: patientMatch[1]?.trim() || "",
+            tone: "patient" as const,
+          };
+        }
+
+        return {
+          key: `${keyPrefix}-x-${index}`,
+          speaker: "Doctor",
+          message: line.trim(),
+          tone: "doctor" as const,
+        };
+      })
+      .filter((row) => row.message.length > 0);
+
+  // English-only questionnaire lines in the same D/P bubble layout as the visit transcript.
+  const questionnaireRows = toSpeakerRows(
+    qaHistoryToEnglishTranscriptLines(qaHistory),
+    "qa"
+  );
+  const visitRows = toSpeakerRows(displayTranscription, "visit");
+  const conversationRows =
+    questionnaireRows.length > 0 ? [...questionnaireRows, ...visitRows] : visitRows;
+
+  const renderSpeakerRow = (row: SpeakerRow) => (
+    <div key={row.key} className="flex items-start gap-3 mb-4">
+      <div
+        className={`h-9 w-9 rounded-full text-white text-sm font-semibold flex items-center justify-center flex-shrink-0 ${
+          row.tone === "doctor" ? "bg-brand-blue" : "bg-brand-orange"
+        }`}
+      >
+        {row.tone === "doctor" ? "D" : "P"}
+      </div>
+      <div className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm">
+        <p
+          className={`text-lg font-semibold ${
+            row.tone === "doctor" ? "text-brand-blue" : "text-brand-orange"
+          }`}
+        >
+          {row.speaker}
+        </p>
+        <p className="text-base leading-relaxed text-slate-700">{row.message}</p>
+      </div>
+    </div>
+  );
 
   return (
     <div className="p-3 sm:p-6">
       <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)]">
-          <h3 className="font-medium text-lg text-black mb-4 flex items-center gap-2">
+        <h3 className="font-medium text-lg text-black mb-4 flex items-center gap-2">
           <FileText className="h-5 w-5 text-slate-500" />
           Full Conversation
         </h3>
         <div className="bg-slate-50 rounded-xl p-4 max-h-[60vh] overflow-y-auto border border-slate-100">
           {sectionLoading.transcription ? (
             <SectionBodyLoader />
+          ) : conversationRows.length === 0 ? (
+            <p className="text-slate-400 italic text-center">No transcription available</p>
           ) : (
-            <>
-              {qaHistory.length > 0 && (
-                <div className="mb-6 space-y-4">
-                  <h4 className="text-sm font-semibold text-slate-600">Questionnaire</h4>
-                  {qaHistory.map((qa, idx) => (
-                    <div key={idx} className="space-y-2 pb-3 border-b border-slate-200">
-                      <p className="text-sm font-semibold text-brand-green">Doctor</p>
-                      <p className="text-base text-slate-700">{qa.questionEn}</p>
-                      {qa.questionTranslated && (
-                        <p className="text-sm text-slate-500 italic">{qa.questionTranslated}</p>
-                      )}
-                      <p className="text-sm font-semibold text-brand-orange mt-2">Patient</p>
-                      <PatientAnswerDisplay
-                        original={qa.responseTranslated?.original_text}
-                        english={
-                          qa.responseTranslated?.english_translation || qa.responseEn
-                        }
-                        language={qa.language}
-                        skipped={!qa.responseTranslated && qa.responseEn === "Skipped"}
-                        noSpeech={isNoSpeechResponse(qa.responseEn)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              )}
-              {speakerRows.length === 0 && qaHistory.length === 0 ? (
-                <p className="text-slate-400 italic text-center">No transcription available</p>
-              ) : (
-                speakerRows.map((row) => (
-                  <div key={row.key} className="flex items-start gap-3 mb-4">
-                    <div
-                      className={`h-9 w-9 rounded-full text-white text-sm font-semibold flex items-center justify-center flex-shrink-0 ${
-                        row.tone === "doctor" ? "bg-brand-blue" : "bg-brand-orange"
-                      }`}
-                    >
-                      {row.tone === "doctor" ? "D" : "P"}
-                    </div>
-                    <div className="flex-1 bg-white border border-slate-200 rounded-xl px-3 py-2 shadow-sm">
-                      <p className={`text-lg font-semibold ${row.tone === "doctor" ? "text-brand-blue" : "text-brand-orange"}`}>
-                        {row.speaker}
-                      </p>
-                      <p className="text-base leading-relaxed text-slate-700">{row.message}</p>
-                    </div>
-                  </div>
-                ))
-              )}
-            </>
+            conversationRows.map(renderSpeakerRow)
           )}
         </div>
       </div>
@@ -1876,7 +1886,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
   const router = useRouter();
   const pathname = usePathname();
   const isVisitDetailsRoute = withoutBasePath(pathname ?? "") === "/visit-details";
-  const { reportData, visitId, transcription, formattedTranscription, recordingTime, visitMinutesCharged } = useAppSelector((s) => s.recording);
+  const { reportData, visitId, transcription, formattedTranscription, recordingTime, visitMinutesCharged, qaHistory } = useAppSelector((s) => s.recording);
   const mriReport = useAppSelector((s) => s.recording.mriReport);
   const transcriptMessage = buildTranscriptMessage(transcription);
   const displayTranscription = formattedTranscription ?? transcription;
@@ -1935,10 +1945,11 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
 
     setIsExporting(true);
     try {
+      const englishQaLines = qaHistoryToEnglishTranscriptLines(qaHistory);
       await exportVisitReportPdf({
         reportData,
         visitId,
-        transcription: displayTranscription,
+        transcription: [...englishQaLines, ...displayTranscription],
       });
     } finally {
       setIsExporting(false);

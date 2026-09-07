@@ -259,3 +259,23 @@ export function qaHistoryToQuestionnaireResponses(
       "Skipped",
   }));
 }
+
+/** English Doctor/Patient lines for Transcription tab / PDF (no translations). */
+export function qaHistoryToEnglishTranscriptLines(
+  qaHistory: Array<{
+    questionEn: string;
+    responseEn?: string;
+    responseTranslated: { english_translation: string; original_text?: string } | null;
+  }>
+): string[] {
+  const lines: string[] = [];
+  for (const qa of qaHistory) {
+    const answer =
+      qa.responseTranslated?.english_translation ||
+      qa.responseEn ||
+      "Skipped";
+    lines.push(`Doctor: ${qa.questionEn}`);
+    lines.push(`Patient: ${answer}`);
+  }
+  return lines;
+}

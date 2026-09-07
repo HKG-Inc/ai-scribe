@@ -25,6 +25,7 @@ import {
   identityApi,
   savePendingSignupProfile,
 } from "@/lib/auth/session";
+import { toast } from "sonner";
 
 const COUNTRY_CODES = [
   { code: "+1", country: "US/CA" },
@@ -196,7 +197,9 @@ export default function SignupPage() {
         return;
       }
 
-      router.push(`/login?email=${encodeURIComponent(trimmedForm.email)}&signup=success`);
+      // Do not auto-login after signup — require explicit Sign In.
+      toast.success("Account created successfully. Please sign in.");
+      router.push(`/login?email=${encodeURIComponent(trimmedForm.email)}`);
     } catch (error) {
       setServerError(formatAuthError(error, "Sign up failed. Please try again."));
     } finally {

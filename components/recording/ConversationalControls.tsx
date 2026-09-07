@@ -73,6 +73,11 @@ export function ConversationalControls({
   const [isQuestionnaireStarting, setIsQuestionnaireStarting] = useState(false);
   const [isBufferingAnswer, setIsBufferingAnswer] = useState(false);
   const isBusyRef = useRef(false);
+  /** Tracks index for rapid Skip before Redux re-renders. */
+  const questionIndexRef = useRef(currentQuestionIndex);
+  questionIndexRef.current = currentQuestionIndex;
+  /** Bumped on Skip so a superseded play does not update UI after advance. */
+  const playGenerationRef = useRef(0);
 
   const hasValidResponse =
     !!currentQuestionResponse && !isNoSpeechResponse(currentQuestionResponse);
@@ -84,11 +89,17 @@ export function ConversationalControls({
     const question = QUESTIONS[index];
     if (!question) return;
 
+    const generation = playGenerationRef.current;
+    dispatch(setCurrentQuestionTranslated(""));
     dispatch(setQuestionnaireStatus("Playing question..."));
     try {
       const { translatedText } = await playQuestion(index, language, {
-        onTranslatedText: (text) => dispatch(setCurrentQuestionTranslated(text)),
+        onTranslatedText: (text) => {
+          if (generation !== playGenerationRef.current) return;
+          dispatch(setCurrentQuestionTranslated(text));
+        },
       });
+      if (generation !== playGenerationRef.current) return;
       dispatch(
         setCurrentQuestionTranslated(
           translatedText || (language === PARENT_LANGUAGE ? question.text_en : "")
@@ -97,9 +108,12 @@ export function ConversationalControls({
       dispatch(setQuestionnaireStatus("Ready to record your answer"));
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") {
-        dispatch(setQuestionnaireStatus(""));
+        if (generation === playGenerationRef.current) {
+          dispatch(setQuestionnaireStatus(""));
+        }
         return;
       }
+      if (generation !== playGenerationRef.current) return;
       const message =
         error instanceof Error ? error.message : "Failed to play question";
       dispatch(setQuestionnaireStatus(""));
@@ -191,28 +205,38 @@ export function ConversationalControls({
     if (!selectedLanguage || isBusyRef.current || isBufferingAnswer) return;
 
     isBusyRef.current = true;
+    playGenerationRef.current += 1;
+    const language = selectedLanguage;
+    let nextIndex = -1;
+
     try {
-      await cancelPlay();
+      // Stop local audio immediately; send end + drain in background on the same WS
+      // (playQuestion awaits turn_complete before starting the next question).
+      await cancelPlay({ settle: false });
       dispatch(setRecordingAnswer(false));
       dispatch(setAnswerPaused(false));
 
-      const question = QUESTIONS[currentQuestionIndex];
+      const index = questionIndexRef.current;
+      const question = QUESTIONS[index];
       if (question) {
         dispatch(
           addQAHistory({
             question_id: question.id,
             questionEn: question.text_en,
-            questionTranslated: currentQuestionTranslated,
+            // Avoid attaching a prior question's translation on rapid Skip before re-render.
+            questionTranslated:
+              index === currentQuestionIndex ? currentQuestionTranslated : "",
             responseEn: "Skipped",
             responseTranslated: null,
-            language: selectedLanguage,
+            language,
             timestamp: createQuestionnaireTimestamp(),
-            questionNumber: currentQuestionIndex + 1,
+            questionNumber: index + 1,
           })
         );
       }
 
-      const nextIndex = currentQuestionIndex + 1;
+      nextIndex = index + 1;
+      questionIndexRef.current = nextIndex;
       stopQuestionnaireReplySession();
       if (nextIndex >= QUESTIONS.length) {
         dispatch(completeQuestionnaire());
@@ -220,10 +244,15 @@ export function ConversationalControls({
         return;
       }
       dispatch(nextQuestion());
-      await playCurrentQuestion(nextIndex, selectedLanguage);
+      // Clear immediately so prior Q translation cannot flash on the next card.
+      dispatch(setCurrentQuestionTranslated(""));
     } finally {
+      // Release before next-question audio so Skip stays clickable mid-playback.
       isBusyRef.current = false;
     }
+
+    // Fire-and-forget: waiting here previously blocked continuous Skip.
+    void playCurrentQuestion(nextIndex, language);
   };
 
   const handleReplay = () => {

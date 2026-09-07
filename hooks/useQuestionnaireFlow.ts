@@ -16,6 +16,7 @@ import {
   buildPlayAgentPrompt,
   buildReplyLanguageHint,
   languageNameForPrompt,
+  normalizePlayTranslation,
 } from "@/lib/questionnaire/constants";
 import {
   concatInt16,
@@ -49,6 +50,10 @@ export function useQuestionnaireFlow() {
   const playAbortRef = useRef<AbortController | null>(null);
   const playEpochRef = useRef(0);
   const playTurnActiveRef = useRef(false);
+  /** True after Skip/interrupt until turn_complete (or timeout) on the play WS. */
+  const playDrainNeededRef = useRef(false);
+  /** Shared drain so Skip can return immediately while playQuestion awaits the same mark. */
+  const playDrainPromiseRef = useRef<Promise<void> | null>(null);
   const audioWsRef = useRef<WebSocket | null>(null);
   const audioSessionRef = useRef<LiveSessionInfo | null>(null);
   const replyWsRef = useRef<WebSocket | null>(null);
@@ -89,50 +94,39 @@ export function useQuestionnaireFlow() {
   }, []);
 
   /**
-   * Stop local playback. When a play turn is active, interrupt the agent and
-   * drain until turn_complete/end (or timeout) so a late end cannot land on the
-   * next question's listener and stop its audio.
+   * Wait until the play agent signals the interrupted turn is done
+   * (turn_complete / end) — the mark that it is safe to start the next question
+   * on the same WebSocket. Idempotent: concurrent callers share one promise.
    */
-  const cancelPlay = useCallback(async (options?: { settle?: boolean }) => {
-    playEpochRef.current += 1;
-    const wasActive = playTurnActiveRef.current || !!playAbortRef.current;
-    playAbortRef.current?.abort();
-    playAbortRef.current = null;
-
-    if (playerNodeRef.current) {
-      playerNodeRef.current.port.postMessage({ command: "reset" });
-    }
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
+  const ensurePlayDrain = useCallback((ws: WebSocket): Promise<void> => {
+    if (playDrainPromiseRef.current) {
+      return playDrainPromiseRef.current;
     }
 
-    const ws = audioWsRef.current;
-    const shouldSettle = options?.settle !== false && wasActive && isSocketOpen(ws);
-
-    if (!shouldSettle) {
-      playTurnActiveRef.current = false;
-      return;
-    }
-
-    try {
-      endTurn(ws!);
-    } catch {
-      // ignore
-    }
-
-    await new Promise<void>((resolve) => {
+    playDrainPromiseRef.current = new Promise<void>((resolve) => {
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
         clearTimeout(timer);
-        ws!.removeEventListener("message", onDrainMessage);
+        ws.removeEventListener("message", onDrainMessage);
         playTurnActiveRef.current = false;
+        playDrainNeededRef.current = false;
+        playDrainPromiseRef.current = null;
+        if (playerNodeRef.current) {
+          playerNodeRef.current.port.postMessage({ command: "reset" });
+        }
         resolve();
       };
 
       const onDrainMessage = (event: MessageEvent) => {
-        if (typeof event.data !== "string") return;
+        // Drop leftover TTS while draining so it cannot reach the next play.
+        if (typeof event.data !== "string") {
+          if (playerNodeRef.current) {
+            playerNodeRef.current.port.postMessage({ command: "reset" });
+          }
+          return;
+        }
         try {
           const frame = JSON.parse(event.data) as {
             type?: string;
@@ -150,10 +144,66 @@ export function useQuestionnaireFlow() {
         }
       };
 
-      ws!.addEventListener("message", onDrainMessage);
-      const timer = setTimeout(finish, 400);
+      ws.addEventListener("message", onDrainMessage);
+      // Safety net if the agent never emits the completion mark.
+      const timer = setTimeout(finish, 1200);
     });
+
+    return playDrainPromiseRef.current;
   }, []);
+
+  /**
+   * Stop local playback.
+   * - settle:false (Skip): instant silence, send end, drain in background, keep WS.
+   * - settle:true (before next play): await turn_complete mark, then reuse same WS.
+   */
+  const cancelPlay = useCallback(
+    async (options?: { settle?: boolean }) => {
+      const wasActive =
+        playTurnActiveRef.current ||
+        !!playAbortRef.current ||
+        playDrainNeededRef.current;
+      const ws = audioWsRef.current;
+      const settle = options?.settle !== false;
+
+      // Silence immediately, before waiting on the agent.
+      if (playerNodeRef.current) {
+        playerNodeRef.current.port.postMessage({ command: "reset" });
+      }
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+
+      // Attach drain + send end BEFORE bumping epoch so we do not miss turn_complete.
+      if (wasActive && isSocketOpen(ws) && !playDrainNeededRef.current) {
+        try {
+          endTurn(ws!);
+        } catch {
+          // ignore
+        }
+        playDrainNeededRef.current = true;
+        void ensurePlayDrain(ws!);
+      }
+
+      playEpochRef.current += 1;
+      playAbortRef.current?.abort();
+      playAbortRef.current = null;
+
+      if (!settle) {
+        // UI can advance immediately; playQuestion will await the same drain.
+        return;
+      }
+
+      if (playDrainNeededRef.current && isSocketOpen(ws)) {
+        await ensurePlayDrain(ws!);
+        return;
+      }
+
+      playTurnActiveRef.current = false;
+      playDrainNeededRef.current = false;
+    },
+    [ensurePlayDrain]
+  );
 
   const ensureAudioLive = useCallback(async (agentSlug: string) => {
     if (isSocketOpen(audioWsRef.current) && audioSessionRef.current) {
@@ -314,7 +364,14 @@ export function useQuestionnaireFlow() {
       signal: AbortSignal,
       onTranslatedText?: (text: string) => void
     ): Promise<string> => {
+      const abortIfNeeded = () => {
+        if (signal.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+      };
+
       await ensurePlayer();
+      abortIfNeeded();
       playerNodeRef.current?.port.postMessage({ command: "reset" });
 
       const prompt = buildPlayAgentPrompt(
@@ -323,9 +380,13 @@ export function useQuestionnaireFlow() {
       );
 
       const ws = await ensureAudioLive(QUESTIONNAIRE_PLAY_AGENT);
+      abortIfNeeded();
+
       let translatedText = language === PARENT_LANGUAGE ? question.text_en : "";
       const myEpoch = playEpochRef.current;
       let heardOutput = false;
+      // Ignore any stray frames until we have sent THIS question's prompt.
+      let turnStarted = false;
 
       playTurnActiveRef.current = true;
 
@@ -347,7 +408,8 @@ export function useQuestionnaireFlow() {
           settled = true;
           clearTimeout(timeout);
           ws.removeEventListener("message", onMessage);
-          // Keep playTurnActive true so cancelPlay can drain the interrupted turn.
+          // Keep playTurnActive true so cancelPlay can drain the interrupted turn
+          // when the socket is still open; soft-cancel clears it after disconnect.
           if (!signal.aborted) {
             notifyPlaySettled();
           }
@@ -358,7 +420,7 @@ export function useQuestionnaireFlow() {
           !signal.aborted && playEpochRef.current === myEpoch;
 
         const onMessage = (event: MessageEvent) => {
-          if (!isCurrent()) {
+          if (!isCurrent() || !turnStarted) {
             return;
           }
 
@@ -367,7 +429,7 @@ export function useQuestionnaireFlow() {
             if (payload instanceof Blob) {
               payload = await payload.arrayBuffer();
             }
-            if (!isCurrent()) return;
+            if (!isCurrent() || !turnStarted) return;
 
             const parsed = parseLiveEvent(payload);
             if (parsed.binary && playerNodeRef.current) {
@@ -382,13 +444,22 @@ export function useQuestionnaireFlow() {
               parsed.partial !== true &&
               typeof parsed.content === "string"
             ) {
-              const text = parsed.content.trim();
+              const text = normalizePlayTranslation(parsed.content);
               const source = parsed.source || "";
               if (
                 text &&
                 source !== "input_transcription" &&
                 (source === "output" || source === "output_transcription" || !source)
               ) {
+                // Prefer the cleaner/longer translation if multiple text frames arrive.
+                if (
+                  translatedText &&
+                  source === "output_transcription" &&
+                  translatedText.length >= text.length
+                ) {
+                  heardOutput = true;
+                  return;
+                }
                 heardOutput = true;
                 translatedText = text;
                 onTranslatedText?.(text);
@@ -408,10 +479,16 @@ export function useQuestionnaireFlow() {
           })();
         };
 
+        if (signal.aborted || playEpochRef.current !== myEpoch) {
+          finishReject(new DOMException("Aborted", "AbortError"));
+          return;
+        }
+
         ws.addEventListener("message", onMessage);
         startTurn(ws, "text");
         sendText(ws, prompt);
         endTurn(ws);
+        turnStarted = true;
 
         signal.addEventListener(
           "abort",
@@ -439,7 +516,12 @@ export function useQuestionnaireFlow() {
       }
 
       // Settle any in-flight play so a late end cannot stop this question.
+      const epochBeforeSettle = playEpochRef.current;
       await cancelPlay({ settle: true });
+      // Another skip/cancel raced us during settle — do not start stale audio.
+      if (playEpochRef.current !== epochBeforeSettle + 1) {
+        throw new DOMException("Aborted", "AbortError");
+      }
       setReplyInputBlocked(true);
 
       // Open reply-agent session while question audio plays so Record
