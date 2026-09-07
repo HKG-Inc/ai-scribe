@@ -154,7 +154,12 @@ export function ConversationalControls({
     stopQuestionnaireReplySession();
 
     if (nextIndex >= QUESTIONS.length) {
+      // Completing hides the in-progress panel (questionnaireStarted=false).
+      // Current answer must already be in qaHistory via saveCurrentToHistory().
       dispatch(completeQuestionnaire());
+      dispatch(setCurrentQuestionResponse(""));
+      dispatch(setCurrentQuestionTranslated(""));
+      dispatch(setCurrentResponseTranslated(null));
       toast.success("Questionnaire completed! You can now record the visit notes.");
       return;
     }
@@ -239,6 +244,9 @@ export function ConversationalControls({
       stopQuestionnaireReplySession();
       if (nextIndex >= QUESTIONS.length) {
         dispatch(completeQuestionnaire());
+        dispatch(setCurrentQuestionResponse(""));
+        dispatch(setCurrentQuestionTranslated(""));
+        dispatch(setCurrentResponseTranslated(null));
         toast.success("Questionnaire completed! You can now record the visit notes.");
         return;
       }

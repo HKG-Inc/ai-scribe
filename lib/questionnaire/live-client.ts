@@ -109,6 +109,32 @@ export function compressSilenceChunks(parts: Int16Array[]): {
   };
 }
 
+/**
+ * Live-stream gate: forward speech + a short silence bridge, but drop longer
+ * mid-utterance pauses. Trailing silence is still sent separately on Stop.
+ */
+export function createLiveSilenceGate(keepChunks = KEEP_SILENCE_CHUNKS) {
+  let silenceRun = 0;
+
+  return {
+    reset() {
+      silenceRun = 0;
+    },
+    /** Whether this chunk should be sent on the live WebSocket. */
+    shouldSend(chunk: Int16Array, bufferedParts: Int16Array[]): boolean {
+      const thresh = silenceThreshold(
+        bufferedParts.length ? bufferedParts : [chunk]
+      );
+      if (chunkRms(chunk) < thresh) {
+        silenceRun += 1;
+        return silenceRun <= keepChunks;
+      }
+      silenceRun = 0;
+      return true;
+    },
+  };
+}
+
 export function splitIntoSendChunks(pcm: Int16Array): Int16Array[] {
   const chunks: Int16Array[] = [];
   for (let i = 0; i < pcm.length; i += PCM_CHUNK_SAMPLES) {
@@ -194,7 +220,23 @@ function findStructuredReply(value: unknown, depth = 0): ReplyStructured | null 
   const direct = structuredFromRecord(record);
   if (direct) return direct;
 
-  for (const key of ["args", "content", "result", "data", "payload", "output"]) {
+  for (const key of [
+    "args",
+    "arguments",
+    "content",
+    "result",
+    "data",
+    "payload",
+    "output",
+    "response",
+    "model_response",
+  ]) {
+    const found = findStructuredReply(record[key], depth + 1);
+    if (found) return found;
+  }
+
+  // Nested tool_calls: [{ name, args|arguments }]
+  for (const key of ["tool_calls", "function_calls"]) {
     const found = findStructuredReply(record[key], depth + 1);
     if (found) return found;
   }
@@ -218,7 +260,11 @@ export function extractStructured(event: Record<string, unknown>): ReplyStructur
 
   if (event.type === "tool_call" || event.type === "function_call") {
     const toolArgs = parseMaybeJson(event.args ?? event.arguments);
-    return findStructuredReply(toolArgs);
+    const fromArgs = findStructuredReply(toolArgs);
+    if (fromArgs) return fromArgs;
+
+    const nested = event.tool_calls ?? event.function_calls;
+    return findStructuredReply(nested);
   }
 
   if (event.type === "data" && typeof event.content === "string") {
@@ -229,9 +275,22 @@ export function extractStructured(event: Record<string, unknown>): ReplyStructur
 }
 
 function replyToolName(event: Record<string, unknown>): string | null {
-  if (event.type !== "tool_call" && event.type !== "function_call") return null;
-  const name = event.name ?? event.tool;
-  return typeof name === "string" ? name : null;
+  if (event.type === "tool_call" || event.type === "function_call") {
+    const name = event.name ?? event.tool;
+    if (typeof name === "string") return name;
+  }
+
+  for (const key of ["tool_calls", "function_calls"]) {
+    const calls = event[key];
+    if (!Array.isArray(calls) || !calls.length) continue;
+    const first = calls[0];
+    if (!first || typeof first !== "object") continue;
+    const call = first as Record<string, unknown>;
+    const name = call.name ?? call.tool;
+    if (typeof name === "string") return name;
+  }
+
+  return null;
 }
 
 /**
@@ -285,17 +344,30 @@ export interface ParsedLiveEvent {
 }
 
 export function parseLiveEvent(data: string | ArrayBuffer | Blob): ParsedLiveEvent {
+  if (typeof data === "string") {
+    try {
+      return JSON.parse(data) as ParsedLiveEvent;
+    } catch {
+      return {};
+    }
+  }
+
+  // Some gateways deliver JSON tool_call frames as binary; try decode before PCM.
   if (data instanceof ArrayBuffer) {
+    if (data.byteLength > 1 && data.byteLength < 1_000_000) {
+      try {
+        const text = new TextDecoder("utf-8").decode(data).trim();
+        if (text.startsWith("{") || text.startsWith("[")) {
+          return JSON.parse(text) as ParsedLiveEvent;
+        }
+      } catch {
+        // Fall through — treat as PCM.
+      }
+    }
     return { binary: data };
   }
-  if (data instanceof Blob) {
-    return { binary: undefined };
-  }
-  try {
-    return JSON.parse(data) as ParsedLiveEvent;
-  } catch {
-    return {};
-  }
+
+  return {};
 }
 
 export function isSocketOpen(ws: WebSocket | null): boolean {

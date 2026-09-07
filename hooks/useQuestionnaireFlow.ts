@@ -19,8 +19,10 @@ import {
   normalizePlayTranslation,
 } from "@/lib/questionnaire/constants";
 import {
+  compressSilenceChunks,
   concatInt16,
   connectLiveSocket,
+  createLiveSilenceGate,
   disconnectLive,
   endTurn,
   extractStructured,
@@ -70,6 +72,7 @@ export function useQuestionnaireFlow() {
   const recStreamRef = useRef<MediaStream | null>(null);
   const recSampleRateRef = useRef(TARGET_PCM_SAMPLE_RATE);
   const pcmPartsRef = useRef<Int16Array[]>([]);
+  const liveSilenceGateRef = useRef(createLiveSilenceGate());
   const replySegmentsRef = useRef<ReplyStructured[]>([]);
   const replyStructuredRef = useRef<ReplyStructured | null>(null);
   /** Highest accepted reply source priority (set_model_response > emit_transcription > text). */
@@ -338,11 +341,9 @@ export function useQuestionnaireFlow() {
 
   const handleReplyEvent = useCallback(
     (parsed: Record<string, unknown>) => {
-      if (
-        parsed.type === "end" ||
-        parsed.type === "turn_complete" ||
-        parsed.finished === true
-      ) {
+      // Only hard turn markers — data frames often set finished:true per chunk and
+      // must not end the wait early (especially before set_model_response arrives).
+      if (parsed.type === "end" || parsed.type === "turn_complete") {
         replyTurnEndedRef.current = true;
       }
 
@@ -680,6 +681,7 @@ export function useQuestionnaireFlow() {
       setReplyInputBlocked(false);
       recordingPausedRef.current = false;
       pcmPartsRef.current = [];
+      liveSilenceGateRef.current.reset();
       liveStreamActiveRef.current = false;
 
       replyStructuredRef.current = null;
@@ -732,7 +734,15 @@ export function useQuestionnaireFlow() {
 
         if (liveStreamActiveRef.current && isSocketOpen(replyWsRef.current)) {
           try {
-            sendPcm(replyWsRef.current!, chunk as Int16Array);
+            // Drop long mid-utterance pauses; trailing silence is sent on Stop.
+            if (
+              liveSilenceGateRef.current.shouldSend(
+                chunk as Int16Array,
+                pcmPartsRef.current
+              )
+            ) {
+              sendPcm(replyWsRef.current!, chunk as Int16Array);
+            }
           } catch {
             liveStreamActiveRef.current = false;
           }
@@ -754,6 +764,7 @@ export function useQuestionnaireFlow() {
     let lastCount = replySegmentsRef.current.length;
     let lastChange = Date.now();
     let turnEndedAt: number | null = null;
+    let lastPriority = replyPriorityRef.current;
 
     while (Date.now() - started < REPLY_MAX_WAIT_MS) {
       if (replyAbortRef.current) break;
@@ -766,22 +777,40 @@ export function useQuestionnaireFlow() {
         lastCount = replySegmentsRef.current.length;
         lastChange = Date.now();
       }
+      if (replyPriorityRef.current !== lastPriority) {
+        lastPriority = replyPriorityRef.current;
+        lastChange = Date.now();
+      }
 
-      if (hasUsableReply(replyStructuredRef.current) && Date.now() - lastChange >= REPLY_QUIET_MS) {
+      const usable = hasUsableReply(replyStructuredRef.current);
+      // Prefer set_model_response (priority 3); don't settle early on text-only.
+      const hasPreferred = replyPriorityRef.current >= 3;
+      const quietFor = Date.now() - lastChange;
+
+      if (usable && hasPreferred && quietFor >= REPLY_QUIET_MS) {
         break;
       }
 
+      if (usable && hasPreferred && turnEndedAt !== null && Date.now() - turnEndedAt >= 400) {
+        break;
+      }
+
+      // After turn end, wait ~2s for set_model_response before accepting lower-priority text.
       if (
+        usable &&
         turnEndedAt !== null &&
-        hasUsableReply(replyStructuredRef.current) &&
-        Date.now() - turnEndedAt >= 400
+        Date.now() - turnEndedAt >= 2000 &&
+        quietFor >= REPLY_QUIET_MS
       ) {
         break;
       }
 
-      if (turnEndedAt !== null && Date.now() - turnEndedAt >= 2500) {
+      // Agent omitted turn_complete — settle on a stable reply after a longer quiet.
+      if (usable && turnEndedAt === null && quietFor >= REPLY_QUIET_MS * 2) {
         break;
       }
+
+      // No usable reply yet: keep waiting until REPLY_MAX_WAIT_MS (do not bail at 2.5s).
 
       await sleep(80);
     }
@@ -794,9 +823,8 @@ export function useQuestionnaireFlow() {
    * buffer), and wait for transcription. Keeps the reply session open so a
    * no-speech retry can reuse it.
    *
-   * Before trailing silence / endTurn, send a language hint so the reply
-   * agent transcribes in native script (e.g. Telugu) instead of Latin
-   * transliteration.
+   * Mid-utterance pauses are trimmed; language hint + trailing silence are
+   * sent before endTurn so ASR keeps native script and can finalize.
    */
   const stopRecordingAndTranscribe = useCallback(
     async (
@@ -806,8 +834,9 @@ export function useQuestionnaireFlow() {
       recordingPausedRef.current = false;
       stopMic();
 
-      // Keep silence/pauses intact so the agent can detect ~0.8s quiet.
-      const pcm = concatInt16(pcmPartsRef.current);
+      // Compress mid-speech pauses; intentional quiet is appended via sendTrailingSilence.
+      const { parts: speechParts } = compressSilenceChunks(pcmPartsRef.current);
+      const pcm = concatInt16(speechParts);
 
       if (pcm.length < MIN_ANSWER_SAMPLES) {
         throw new Error("Recording too short. Speak longer, then stop.");

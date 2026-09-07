@@ -133,7 +133,19 @@ export function TranscriptionPanel({
               </div>
             ))}
 
-            {questionnaireStarted && !questionnaireCompleted && (
+            {(() => {
+              const lastHistoryNumber = qaHistory[qaHistory.length - 1]?.questionNumber;
+              const currentNumber = currentQuestionIndex + 1;
+              // In-progress question, OR last answer orphaned after complete if save missed history.
+              const showCurrentCard =
+                (questionnaireStarted && !questionnaireCompleted) ||
+                (questionnaireCompleted &&
+                  !!currentQuestionResponse &&
+                  lastHistoryNumber !== currentNumber);
+
+              if (!showCurrentCard) return null;
+
+              return (
               <div className="space-y-3">
                 <div className="text-sm font-semibold text-brand-green">Doctor</div>
                 <DoctorQuestionDisplay
@@ -168,7 +180,8 @@ export function TranscriptionPanel({
                   </>
                 )}
               </div>
-            )}
+              );
+            })()}
 
             {(questionnaireCompleted || qaHistory.length > 0) && transcription.length > 0 && (
               <div>
