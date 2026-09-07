@@ -124,8 +124,8 @@ export default function SignupPage() {
     if (!data.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.email)) {
       newErrors.email = "Valid email is required";
     }
-    if (!data.phone || !/^\d+$/.test(data.phone)) {
-      newErrors.phone = "Valid phone number is required";
+    if (!data.phone || !/^\d{10}$/.test(data.phone)) {
+      newErrors.phone = "Phone number must be exactly 10 digits";
     }
     if (!data.specialty) {
       newErrors.specialty = "Please select a specialty";
@@ -333,10 +333,13 @@ export default function SignupPage() {
                     <Phone className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
                     <input
                       type="tel"
+                      inputMode="numeric"
+                      autoComplete="tel-national"
+                      maxLength={10}
                       placeholder="Phone Number"
                       value={form.phone}
                       onChange={(e) =>
-                        updateField("phone", e.target.value.replace(/\D/g, ""))
+                        updateField("phone", e.target.value.replace(/\D/g, "").slice(0, 10))
                       }
                       className={`pl-10 h-12 rounded-xl border w-full text-sm placeholder:text-slate-400 focus:outline-none focus:border-brand-blue focus:ring-1 focus:ring-brand-blue ${errors.phone ? "border-red-500" : "border-slate-200"}`}
                     />
