@@ -374,6 +374,27 @@ export function isSocketOpen(ws: WebSocket | null): boolean {
   return !!ws && ws.readyState === WebSocket.OPEN;
 }
 
+/**
+ * Live gateway may keep the WebSocket OPEN after aborting the session and only
+ * send a JSON error frame (e.g. 1008). Treat that as a dead session — do not
+ * keep sending on the same socket.
+ */
+export function isLiveSessionAbortError(
+  parsed: ParsedLiveEvent | Record<string, unknown> | null | undefined
+): boolean {
+  if (!parsed || typeof parsed !== "object") return false;
+  if (parsed.type !== "error") return false;
+  const message =
+    typeof (parsed as { message?: unknown }).message === "string"
+      ? ((parsed as { message: string }).message as string)
+      : "";
+  return (
+    message.includes("1008") ||
+    /operation was aborted/i.test(message) ||
+    /session.*(expir|abort)/i.test(message)
+  );
+}
+
 export interface LiveSessionInfo {
   session_id: string;
   wss_url: string;

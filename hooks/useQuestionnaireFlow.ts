@@ -35,6 +35,7 @@ import {
   parseLiveEvent,
   pcmRms,
   resamplePcm16,
+  isLiveSessionAbortError,
   sendPcm,
   sendRecordedPcmStream,
   sendText,
@@ -131,6 +132,53 @@ export function useQuestionnaireFlow() {
   }, []);
 
   /**
+   * 1008 / "operation was aborted" arrives as a JSON error while the socket can
+   * still be OPEN. Drop the ref immediately so later sends never reuse it.
+   */
+  const retirePlaySocket = useCallback((ws: WebSocket) => {
+    if (audioWsRef.current === ws) {
+      audioWsRef.current = null;
+      audioSessionRef.current = null;
+    }
+    if (standbyWsRef.current === ws) {
+      standbyWsRef.current = null;
+      standbySessionRef.current = null;
+    }
+    disconnectLive(ws);
+  }, []);
+
+  const attachPlaySocketGuards = useCallback(
+    (ws: WebSocket) => {
+      const onMessage = (event: MessageEvent) => {
+        if (typeof event.data !== "string") return;
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(event.data) as Record<string, unknown>;
+        } catch {
+          return;
+        }
+        if (!isLiveSessionAbortError(parsed)) return;
+        ws.removeEventListener("message", onMessage);
+        retirePlaySocket(ws);
+      };
+
+      ws.addEventListener("message", onMessage);
+      ws.addEventListener("close", () => {
+        ws.removeEventListener("message", onMessage);
+        if (audioWsRef.current === ws) {
+          audioWsRef.current = null;
+          audioSessionRef.current = null;
+        }
+        if (standbyWsRef.current === ws) {
+          standbyWsRef.current = null;
+          standbySessionRef.current = null;
+        }
+      });
+    },
+    [retirePlaySocket]
+  );
+
+  /**
    * Pre-mint + connect a spare play WS while the current question plays so
    * Skip can promote it instead of waiting on a fresh session mint.
    */
@@ -154,12 +202,7 @@ export function useQuestionnaireFlow() {
         // Active socket may have been replaced; spare is still useful for next Skip.
         standbySessionRef.current = session;
         standbyWsRef.current = ws;
-        ws.addEventListener("close", () => {
-          if (standbyWsRef.current === ws) {
-            standbyWsRef.current = null;
-            standbySessionRef.current = null;
-          }
-        });
+        attachPlaySocketGuards(ws);
       } catch {
         // Best effort — next ensureAudioLive will mint on demand.
       } finally {
@@ -171,7 +214,7 @@ export function useQuestionnaireFlow() {
 
     standbyWarmPromiseRef.current = promise;
     return promise;
-  }, []);
+  }, [attachPlaySocketGuards]);
 
   const promoteStandby = useCallback((): WebSocket | null => {
     if (!isSocketOpen(standbyWsRef.current) || !standbySessionRef.current) {
@@ -182,12 +225,7 @@ export function useQuestionnaireFlow() {
     audioSessionRef.current = standbySessionRef.current;
     standbyWsRef.current = null;
     standbySessionRef.current = null;
-    ws.addEventListener("close", () => {
-      if (audioWsRef.current === ws) {
-        audioWsRef.current = null;
-      }
-    });
-    // Refill the spare while this session is used.
+    // Guards already attached while standby; refill spare for next Skip.
     void warmPlayStandby();
     return ws;
   }, [warmPlayStandby]);
@@ -310,15 +348,11 @@ export function useQuestionnaireFlow() {
         throw new DOMException("Aborted", "AbortError");
       }
       audioWsRef.current = ws;
-      ws.addEventListener("close", () => {
-        if (audioWsRef.current === ws) {
-          audioWsRef.current = null;
-        }
-      });
+      attachPlaySocketGuards(ws);
       void warmPlayStandby();
       return ws;
     },
-    [promoteStandby, warmPlayStandby]
+    [attachPlaySocketGuards, promoteStandby, warmPlayStandby]
   );
 
   const rememberReplySegment = useCallback(
@@ -388,25 +422,18 @@ export function useQuestionnaireFlow() {
 
   const attachReplySocketHandlers = useCallback(
     (ws: WebSocket, generation: number) => {
-      const onMessage = (event: MessageEvent) => {
-        void (async () => {
-          let payload: string | ArrayBuffer = event.data;
-          if (payload instanceof Blob) {
-            payload = await payload.arrayBuffer();
-          }
-          const parsed = parseLiveEvent(payload);
-          if (parsed.binary) return;
-          handleReplyEvent(parsed as Record<string, unknown>, generation);
-        })();
-      };
+      let retired = false;
 
-      ws.addEventListener("message", onMessage);
-      ws.addEventListener("close", () => {
+      const retireAndMaybeReconnect = () => {
+        if (retired) return;
+        retired = true;
         ws.removeEventListener("message", onMessage);
         if (replyWsRef.current === ws) {
           replyWsRef.current = null;
           replySessionRef.current = null;
         }
+        // Force-close so nothing keeps writing to the aborted session.
+        disconnectLive(ws);
 
         // Intentional teardown (skip / next / unmount) — do not remint.
         if (replyExpectCloseRef.current) return;
@@ -420,6 +447,30 @@ export function useQuestionnaireFlow() {
         void reconnectReplyLiveRef.current?.(questionIndex).catch(() => {
           // Silent — stopRecordingAndTranscribe will surface failures.
         });
+      };
+
+      const onMessage = (event: MessageEvent) => {
+        void (async () => {
+          let payload: string | ArrayBuffer = event.data;
+          if (payload instanceof Blob) {
+            payload = await payload.arrayBuffer();
+          }
+          const parsed = parseLiveEvent(payload);
+          if (parsed.binary) return;
+
+          // 1008 often arrives as JSON while readyState is still OPEN.
+          if (isLiveSessionAbortError(parsed)) {
+            retireAndMaybeReconnect();
+            return;
+          }
+
+          handleReplyEvent(parsed as Record<string, unknown>, generation);
+        })();
+      };
+
+      ws.addEventListener("message", onMessage);
+      ws.addEventListener("close", () => {
+        retireAndMaybeReconnect();
       });
     },
     [handleReplyEvent]
@@ -707,6 +758,22 @@ export function useQuestionnaireFlow() {
               if (!isCurrent() || !turnStarted) return;
 
               const parsed = parseLiveEvent(payload);
+
+              if (isLiveSessionAbortError(parsed)) {
+                // Drop aborted socket immediately — do not keep sending on it.
+                if (audioWsRef.current === ws) {
+                  audioWsRef.current = null;
+                  audioSessionRef.current = null;
+                }
+                disconnectLive(ws);
+                if (translatedText.trim()) {
+                  finishResolve();
+                } else {
+                  finishReject(new Error("Play live aborted before translation"));
+                }
+                return;
+              }
+
               if (parsed.binary && playerNodeRef.current) {
                 heardOutput = true;
                 playerNodeRef.current.port.postMessage(parsed.binary, [
