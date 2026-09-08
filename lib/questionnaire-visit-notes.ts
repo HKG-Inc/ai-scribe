@@ -337,15 +337,20 @@ export function buildSoapNotesCombinedMessage(
   const qaLines = answered
     .map(
       (item) =>
-        `Q: ${item.question_text.trim()}\nA: ${item.answer_text.trim()}`
+        `Q: ${item.question_text.trim()}\nA: ${item.answer_text.trim()}\n\n`
     )
-    .join("\n\n");
+    .join("");
 
   if (!transcript) {
-    return qaLines;
+    return `=== PATIENT QUESTIONNAIRE RESPONSES ===\n${qaLines}`.trim();
   }
 
-  return `${qaLines}\n\n${transcript}`;
+  return (
+    "=== PATIENT QUESTIONNAIRE RESPONSES ===\n" +
+    qaLines +
+    "=== DOCTOR'S VISIT NOTES ===\n" +
+    transcript
+  );
 }
 
 /** English Doctor/Patient lines for Transcription tab / PDF (no translations). */
