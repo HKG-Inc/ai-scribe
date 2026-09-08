@@ -36,6 +36,7 @@ import {
   qaHistoryToQuestionnaireResponses,
   qaHistoryToEnglishTranscriptLines,
 } from "@/lib/questionnaire-visit-notes";
+import { VisitNotesFormatted } from "@/components/report/VisitNotesFormatted";
 import { formatReferralUrgency } from "@/lib/referrals";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
@@ -284,7 +285,13 @@ function MedicalNotesTab({
   const visitId = useAppSelector((s) => s.recording.visitId);
   const sessionId = useAppSelector((s) => s.recording.sessionId);
   const qaHistory = useAppSelector((s) => s.recording.qaHistory);
+  const recordingMode = useAppSelector((s) => s.recording.recordingMode);
   const user = useAppSelector((s) => s.user);
+  /** Conversational mode: one section per row (full width), not a 2-col grid. */
+  const sectionsGridClass =
+    recordingMode === "conversational"
+      ? "grid gap-4 grid-cols-1"
+      : "grid gap-4 grid-cols-1 md:grid-cols-2";
 
   const [expandedSoap, setExpandedSoap] = useState<Record<string, boolean>>({});
   const [retryingSection, setRetryingSection] = useState<"visit" | "soap" | "icd" | "cpt" | "cpt2" | "em" | null>(null);
@@ -690,7 +697,7 @@ function MedicalNotesTab({
 
   return (
     <div className="p-3 sm:p-6 space-y-4">
-      <div className="grid gap-4 grid-cols-1 md:grid-cols-2">
+      <div className={sectionsGridClass}>
         {/* Visit Summary */}
         <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)] flex flex-col max-h-[60vh] overflow-hidden">
           <div className="flex justify-between items-center mb-2">
@@ -758,12 +765,10 @@ function MedicalNotesTab({
                 </button>
               </div>
             </div>
+          ) : visitNotesText ? (
+            <VisitNotesFormatted text={visitNotesText} />
           ) : (
-            <div className="text-justify whitespace-pre-line overflow-y-auto flex-1 min-h-0 pr-4 text-sm text-slate-700">
-              {visitNotesText || (
-                <p className="text-slate-400 italic">No visit summary available.</p>
-              )}
-            </div>
+            <p className="text-slate-400 italic text-sm">No visit summary available.</p>
           )}
         </div>
 
@@ -823,7 +828,7 @@ function MedicalNotesTab({
       </div>
 
       {/* Code cards */}
-      <div className="grid gap-4 grid-cols-1 md:grid-cols-2 mt-4">
+      <div className={`${sectionsGridClass} mt-4`}>
         {/* ICD-10 */}
         <div className="bg-white p-3 rounded-xl border border-slate-100 shadow-[0_2px_6px_rgba(0,0,0,0.04),0_0_16px_2px_rgba(191,223,241,0.9)] max-h-[350px] flex flex-col">
           <div className="flex justify-between items-center mb-2">

@@ -3,6 +3,10 @@ import { cleanDateValue } from "@/lib/utils";
 import { formatMedicationFrequency } from "@/lib/medication";
 import { getProcedureTypeBadge } from "@/lib/procedure-types";
 import { formatReferralUrgency } from "@/lib/referrals";
+import {
+  classifyVisitNotesLine,
+  splitMajorHeader,
+} from "@/lib/visit-notes-display";
 
 export interface ExportVisitReportPdfOptions {
   reportData: ReportData;
@@ -195,7 +199,76 @@ export async function exportVisitReportPdf({
   addSectionTitle("Visit Summary");
   addSubTitle("Notes", true);
   const visitNotesText = reportData.visitNotes.filter((note) => note?.trim()).join("\n\n");
-  addParagraph(visitNotesText || null, 0, false);
+  if (
+    !visitNotesText ||
+    visitNotesText.trim() === "" ||
+    visitNotesText.trim() === "N/A" ||
+    visitNotesText.trim() === "Insufficient content"
+  ) {
+    addParagraph(null, 0, true);
+  } else {
+    const lines = visitNotesText.replace(/\r\n/g, "\n").split("\n");
+    const lineHeight = 5;
+    for (const line of lines) {
+      const kind = classifyVisitNotesLine(line);
+      if (kind === "blank") {
+        y += 3;
+        continue;
+      }
+
+      checkY(lineHeight + 2);
+      if (kind === "major") {
+        const split = splitMajorHeader(line);
+        if (split?.rest) {
+          doc.setFont("helvetica", "bold");
+          const labelWidth = doc.getTextWidth(split.label + " ");
+          doc.text(sanitizeText(split.label) || split.label, margin, y);
+          doc.setFont("helvetica", "normal");
+          const restLines = doc.splitTextToSize(
+            sanitizeText(split.rest) || split.rest,
+            pageWidth - margin * 2 - labelWidth
+          );
+          doc.text(restLines[0] || "", margin + labelWidth, y);
+          y += lineHeight;
+          for (let i = 1; i < restLines.length; i += 1) {
+            checkY(lineHeight);
+            doc.text(restLines[i], margin, y);
+            y += lineHeight;
+          }
+        } else {
+          doc.setFont("helvetica", "bold");
+          const header = split?.label || line.trim();
+          const headerLines = doc.splitTextToSize(
+            sanitizeText(header) || header,
+            pageWidth - margin * 2
+          );
+          doc.text(headerLines, margin, y);
+          y += headerLines.length * lineHeight;
+          doc.setFont("helvetica", "normal");
+        }
+      } else if (kind === "subheader") {
+        doc.setFont("helvetica", "bold");
+        const headerLines = doc.splitTextToSize(
+          sanitizeText(line.trim()) || line.trim(),
+          pageWidth - margin * 2
+        );
+        doc.text(headerLines, margin, y);
+        y += headerLines.length * lineHeight;
+        doc.setFont("helvetica", "normal");
+      } else {
+        doc.setFont("helvetica", "normal");
+        const bodyLines = doc.splitTextToSize(
+          sanitizeText(line) || line,
+          pageWidth - margin * 2
+        );
+        for (const bodyLine of bodyLines) {
+          checkY(lineHeight);
+          doc.text(bodyLine, margin, y);
+          y += lineHeight;
+        }
+      }
+    }
+  }
   y += 4;
 
   // Medical Coding

@@ -112,12 +112,36 @@ export function extractAgentOutput(payload: unknown): Record<string, unknown> {
 }
 
 function stripCcPrefix(text: string): string {
-  return text.replace(/^Chief Complaint:\s*/i, "").trim();
+  return text
+    .replace(/^A\)\s*CHIEF[_\s-]?COMPLAINT:\s*/i, "")
+    .replace(/^Chief Complaint:\s*/i, "")
+    .trim();
+}
+
+function stripMskHeader(text: string): string {
+  return text
+    .replace(/^B\)\s*MSK:\s*History of Present Illness \(HPI\):\s*/i, "")
+    .replace(/^B\)\s*MSK:\s*/i, "")
+    .replace(/^MSK:\s*History of Present Illness \(HPI\):\s*/i, "")
+    .replace(/^History of Present Illness \(HPI\):\s*/i, "")
+    .trim();
 }
 
 function stripTbiHeader(text: string): string {
   return text
-    .replace(/^B\)\s*TBI\s*(\(Traumatic Brain Injury\))?:\s*\n?/i, "")
+    .replace(/^[BC]\)\s*TBI\s*(\(Traumatic Brain Injury\))?:\s*\n?/i, "")
+    .replace(/^TBI:\s*/i, "")
+    .trim();
+}
+
+function stripMedicalHeader(text: string): string {
+  return text.replace(/^D\)\s*MEDICAL:\s*/i, "").replace(/^Medical:\s*/i, "").trim();
+}
+
+function stripFunctionalityHeader(text: string): string {
+  return text
+    .replace(/^E\)\s*FUNCTIONALITY:\s*/i, "")
+    .replace(/^Functionality:\s*/i, "")
     .trim();
 }
 
@@ -137,8 +161,9 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
     asString(outputs.chiefComplaint.chief_complaint_section);
   chiefComplaint = stripCcPrefix(chiefComplaint);
 
-  const msk =
-    asString(outputs.msk.msk) || asString(outputs.msk.msk_section);
+  const msk = stripMskHeader(
+    asString(outputs.msk.msk) || asString(outputs.msk.msk_section)
+  );
 
   const tbiFields = flattenAgentRecord(outputs.tbi);
   let tbi =
@@ -154,8 +179,10 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
   }
   tbi = stripTbiHeader(tbi);
 
-  const medical = asString(outputs.medical.medical);
-  const functionality = asString(outputs.functionality.functionality);
+  const medical = stripMedicalHeader(asString(outputs.medical.medical));
+  const functionality = stripFunctionalityHeader(
+    asString(outputs.functionality.functionality)
+  );
 
   return {
     format_type: "questionnaire",
@@ -175,29 +202,42 @@ export function mergeQuestionnaireAgentOutputs(outputs: {
   };
 }
 
+/** Canonical section headers matching Visit Summary screenshot format. */
 export const QUESTIONNAIRE_VISIT_NOTE_SECTION_LABELS = [
-  "A) Chief Complaint",
-  "B) MSK",
-  "C) TBI",
-  "D) Medical",
-  "E) Functionality",
+  "A) CHIEF_COMPLAINT:",
+  "B) MSK: History of Present Illness (HPI):",
+  "C) TBI:",
+  "D) MEDICAL:",
+  "E) FUNCTIONALITY:",
 ] as const;
-
-const QUESTIONNAIRE_VISIT_NOTE_SECTION_KEYS: Array<
-  keyof QuestionnaireVisitNotesSections
-> = ["chief_complaint", "msk", "tbi", "medical", "functionality"];
 
 const EMPTY_SECTION_PLACEHOLDER = "Not discussed";
 
-/** Flatten structured sections into one display string for the report UI. */
+/**
+ * Flatten structured sections into one display string for the report UI / PDF.
+ * Matches the clinical Visit Summary layout (A–E headers, MSK HPI + anatomy body).
+ */
 export function formatQuestionnaireVisitNotesText(
   sections: QuestionnaireVisitNotesSections
 ): string {
-  return QUESTIONNAIRE_VISIT_NOTE_SECTION_LABELS.map((label, index) => {
-    const key = QUESTIONNAIRE_VISIT_NOTE_SECTION_KEYS[index];
-    const text = sections[key].trim() || EMPTY_SECTION_PLACEHOLDER;
-    return `${label}\n${text}`;
-  }).join("\n\n");
+  const chief =
+    stripCcPrefix(sections.chief_complaint).trim() || EMPTY_SECTION_PLACEHOLDER;
+  const msk = stripMskHeader(sections.msk).trim() || EMPTY_SECTION_PLACEHOLDER;
+  const tbi = stripTbiHeader(sections.tbi).trim() || EMPTY_SECTION_PLACEHOLDER;
+  const medical =
+    stripMedicalHeader(sections.medical).trim() || EMPTY_SECTION_PLACEHOLDER;
+  const functionality =
+    stripFunctionalityHeader(sections.functionality).trim() ||
+    EMPTY_SECTION_PLACEHOLDER;
+
+  return [
+    // Chief complaint keeps label + content on one line (screenshot format).
+    `A) CHIEF_COMPLAINT: ${chief}`,
+    `B) MSK: History of Present Illness (HPI):\n${msk}`,
+    `C) TBI:\n${tbi}`,
+    `D) MEDICAL:\n${medical}`,
+    `E) FUNCTIONALITY:\n${functionality}`,
+  ].join("\n\n");
 }
 
 function isVisitNotesSections(value: unknown): value is QuestionnaireVisitNotesSections {
