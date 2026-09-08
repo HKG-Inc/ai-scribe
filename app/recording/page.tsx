@@ -46,6 +46,7 @@ import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
 import { useCompanionTranscript } from "@/hooks/useCompanionTranscript";
 import {
   mapVisitNotesApiResponseToDisplay,
+  buildSoapNotesCombinedMessage,
   qaHistoryToQuestionnaireResponses,
 } from "@/lib/questionnaire-visit-notes";
 
@@ -545,12 +546,28 @@ export default function RecordingPage() {
     };
 
     const runSoapNotes = async () => {
+      // Use visit recording from store (not synthetic Q&A rawMessage) so we can
+      // combine answered questionnaire items without duplicating / including Skipped.
+      const visitTranscript = store
+        .getState()
+        .recording.transcription.map((line) => line.trim())
+        .filter((line) => line.length > 0)
+        .join("\n");
+      const questionnaireResponses = qaHistoryToQuestionnaireResponses(
+        store.getState().recording.qaHistory
+      );
+      const soapMessage =
+        buildSoapNotesCombinedMessage(visitTranscript, questionnaireResponses) ||
+        rawMessage;
+
       const result = await callAgentRoute<{
         subjective?: string;
         objective?: string;
         assessment?: string;
         plan?: string;
-      }>("/api/soap-notes");
+      }>("/api/soap-notes", {
+        message: soapMessage,
+      });
       if (!result.ok) {
         console.warn("[generateReport] SOAP notes failed:", result.error);
         finishSection("soapNote");

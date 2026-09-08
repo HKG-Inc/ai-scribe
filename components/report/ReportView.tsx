@@ -33,6 +33,7 @@ import { formatMedicationFrequency, normalizeMedicationFrequency } from "@/lib/m
 import { getProcedureTypeBadge, getProcedureTypeBadgeClass } from "@/lib/procedure-types";
 import {
   mapVisitNotesApiResponseToDisplay,
+  buildSoapNotesCombinedMessage,
   qaHistoryToQuestionnaireResponses,
   qaHistoryToEnglishTranscriptLines,
 } from "@/lib/questionnaire-visit-notes";
@@ -474,14 +475,18 @@ function MedicalNotesTab({
   };
 
   const retrySoapNotes = async () => {
-    if (!transcriptMessage) return;
+    const soapMessage = buildSoapNotesCombinedMessage(
+      transcriptMessage,
+      qaHistoryToQuestionnaireResponses(qaHistory)
+    );
+    if (!soapMessage) return;
     setRetryingSection("soap");
     setRetryErrors((prev) => ({ ...prev, soap: "" }));
     try {
       const response = await apiFetch("/api/soap-notes", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: transcriptMessage }),
+        body: JSON.stringify({ message: soapMessage }),
       });
 
       const data = (await response.json()) as {

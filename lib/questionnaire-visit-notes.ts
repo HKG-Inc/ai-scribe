@@ -1,3 +1,5 @@
+import { isNoSpeechResponse } from "@/lib/conversation-mode";
+
 export const QUESTIONNAIRE_VISIT_NOTE_AGENTS = [
   "questionnaire-chief-complaint-agent",
   "questionnaire-msk-agent",
@@ -298,6 +300,52 @@ export function qaHistoryToQuestionnaireResponses(
       qa.responseTranslated?.original_text ||
       "Skipped",
   }));
+}
+
+/** True when the Q&A has a real answer (not empty, Skipped, or no-speech). */
+export function isAnsweredQuestionnaireResponse(item: QuestionnaireQAItem): boolean {
+  const question = item.question_text?.trim() ?? "";
+  const answer = item.answer_text?.trim() ?? "";
+  if (!question || !answer) return false;
+  if (/^skipped$/i.test(answer)) return false;
+  if (isNoSpeechResponse(answer)) return false;
+  return true;
+}
+
+export function filterAnsweredQuestionnaireResponses(
+  responses: QuestionnaireQAItem[]
+): QuestionnaireQAItem[] {
+  return responses.filter(isAnsweredQuestionnaireResponse);
+}
+
+/**
+ * SOAP agent message: answered questionnaire Q&A + visit transcription.
+ * Skipped / empty / no-speech items are omitted. With no answered Q&A, returns
+ * transcription only (same as pre-questionnaire SOAP behavior).
+ */
+export function buildSoapNotesCombinedMessage(
+  transcriptionText: string,
+  questionnaireResponses: QuestionnaireQAItem[] = []
+): string {
+  const answered = filterAnsweredQuestionnaireResponses(questionnaireResponses);
+  const transcript = transcriptionText.trim();
+
+  if (answered.length === 0) {
+    return transcript;
+  }
+
+  const qaLines = answered
+    .map(
+      (item) =>
+        `Q: ${item.question_text.trim()}\nA: ${item.answer_text.trim()}`
+    )
+    .join("\n\n");
+
+  if (!transcript) {
+    return qaLines;
+  }
+
+  return `${qaLines}\n\n${transcript}`;
 }
 
 /** English Doctor/Patient lines for Transcription tab / PDF (no translations). */
