@@ -42,7 +42,14 @@ import { formatReferralUrgency } from "@/lib/referrals";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
 import { toUserFacingApiError } from "@/lib/api-errors";
-import { fetchOrdersPatchFromMessage } from "@/lib/regenerate-orders-from-message";
+import {
+  loadingSectionsForAgents,
+  regenerateFromVisitNotesUpdate,
+} from "@/lib/regenerate-orders-from-message";
+import {
+  diffVisitNotesSections,
+  getAgentsForChangedSections,
+} from "@/lib/visit-notes-update";
 import {
   setCurrentView,
   endVisit,
@@ -336,93 +343,55 @@ function MedicalNotesTab({
     setHasVisitNotesChanged(false);
   };
 
-  const regenerateSoapNotes = async (message: string) => {
-    dispatch(setReportSectionLoading({ section: "soapNote", loading: true }));
-    try {
-      const response = await apiFetch("/api/soap-notes", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
-      });
-
-      const data = (await response.json()) as {
-        subjective?: string;
-        objective?: string;
-        assessment?: string;
-        plan?: string;
-        error?: string;
-      };
-
-      const apiError = getApiError(response, data, "SOAP notes update failed");
-      if (apiError) {
-        throw new Error(apiError);
-      }
-
-      const subjective = data.subjective?.trim() || "";
-      const objective = data.objective?.trim() || "";
-      const assessment = data.assessment?.trim() || "";
-      const plan = data.plan?.trim() || "";
-
-      dispatch(
-        patchReportData({
-          soapNote: {
-            subjective: subjective ? { subjective } : {},
-            objective: objective ? { objective } : {},
-            assessment: assessment ? { assessment } : {},
-            plan: plan ? { plan } : {},
-          },
-        })
-      );
-    } finally {
-      dispatch(setReportSectionLoading({ section: "soapNote", loading: false }));
-    }
-  };
-
-  const regenerateOrdersFromMessage = async (message: string) => {
-    const orderSections = [
-      "medication",
-      "labtest",
-      "followup",
-      "procedure",
-      "referrals",
-      "vaccine",
-    ] as const;
-
-    for (const section of orderSections) {
-      dispatch(setReportSectionLoading({ section, loading: true }));
-    }
-
-    try {
-      const ordersPatch = await fetchOrdersPatchFromMessage(message);
-      dispatch(patchReportData(ordersPatch));
-    } finally {
-      for (const section of orderSections) {
-        dispatch(setReportSectionLoading({ section, loading: false }));
-      }
-    }
-  };
-
   const handleSaveVisitNotes = async () => {
     const nextVisitNotes = editedVisitNotes.trim();
     if (!nextVisitNotes) {
       toast.error("Visit notes cannot be empty.");
       return;
     }
+    if (!reportData) return;
+
+    const previousVisitNotes = visitNotesText;
+    const sessionReportData = reportData;
+    const questionnaireResponses = qaHistoryToQuestionnaireResponses(qaHistory);
+    const changedSections = diffVisitNotesSections(previousVisitNotes, nextVisitNotes);
+    const agents = getAgentsForChangedSections(changedSections);
+    const loadingSections = loadingSectionsForAgents(agents);
 
     setIsSavingVisitNotes(true);
+    for (const section of loadingSections) {
+      dispatch(setReportSectionLoading({ section, loading: true }));
+    }
+
     try {
       dispatch(updateVisitNote(nextVisitNotes));
       setIsEditingVisitNotes(false);
       setEditedVisitNotes("");
       setHasVisitNotesChanged(false);
 
-      await Promise.all([
-        regenerateSoapNotes(nextVisitNotes),
-        regenerateOrdersFromMessage(nextVisitNotes),
-      ]);
+      const result = await regenerateFromVisitNotesUpdate({
+        previousVisitNotes,
+        updatedVisitNotes: nextVisitNotes,
+        reportData: sessionReportData,
+        questionnaireResponses,
+      });
 
-      toast.success("Visit notes updated.");
+      if (Object.keys(result.patch).length > 0) {
+        dispatch(patchReportData(result.patch));
+      }
+
+      if (result.warnings.length > 0) {
+        console.warn("[handleSaveVisitNotes] agent warnings:", result.warnings);
+        toast.error(
+          `Visit notes saved, but ${result.warnings.length} section(s) failed to refresh.`
+        );
+      } else if (result.agentsRequested.length === 0) {
+        toast.success("Visit notes updated.");
+      } else {
+        toast.success("Visit notes updated.");
+      }
     } catch (error) {
+      console.error("[handleSaveVisitNotes] error:", error);
       toast.error(
         toUserFacingApiError(
           error,
@@ -430,6 +399,9 @@ function MedicalNotesTab({
         )
       );
     } finally {
+      for (const section of loadingSections) {
+        dispatch(setReportSectionLoading({ section, loading: false }));
+      }
       setIsSavingVisitNotes(false);
     }
   };
