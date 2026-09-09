@@ -13,7 +13,7 @@ export const MIN_ANSWER_SAMPLES = 1600;
 export const REPLY_TRAILING_SILENCE_MS = 1500;
 export const REPLY_QUIET_MS = 1800;
 export const REPLY_MAX_WAIT_MS = 10000;
-/** Wait after question play settles before pre-minting reply (avoids Skip mint storms). */
+/** Wait after question play *starts* before pre-minting reply (not after settle). */
 export const REPLY_WARM_DELAY_MS = 2000;
 export const PROTOCOL_VERSION = 2;
 

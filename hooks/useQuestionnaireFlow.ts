@@ -88,6 +88,8 @@ export function useQuestionnaireFlow() {
   const replyWarmForQuestionRef = useRef<number | null>(null);
   const playerCtxRef = useRef<AudioContext | null>(null);
   const playerNodeRef = useRef<AudioWorkletNode | null>(null);
+  /** HTMLAudioElement used when playing pre-stored WAV from platform storage. */
+  const storageAudioRef = useRef<HTMLAudioElement | null>(null);
   const recCtxRef = useRef<AudioContext | null>(null);
   const recNodeRef = useRef<AudioWorkletNode | null>(null);
   const recStreamRef = useRef<MediaStream | null>(null);
@@ -201,8 +203,21 @@ export function useQuestionnaireFlow() {
     return ws;
   }, []);
 
+  const stopStorageAudio = useCallback(() => {
+    const audio = storageAudioRef.current;
+    storageAudioRef.current = null;
+    if (!audio) return;
+    try {
+      audio.pause();
+      audio.removeAttribute("src");
+      audio.load();
+    } catch {
+      // ignore
+    }
+  }, []);
+
   /**
-   * Stop local playback.
+   * Stop local playback (storage WAV and/or agent PCM).
    * - settle:false (Skip): instant silence + drop active play WS; invalidate
    *   in-flight standby mints so Skip spam cannot stack live streams.
    * - settle:true: stop in-flight play; reuse open socket when still valid.
@@ -211,6 +226,7 @@ export function useQuestionnaireFlow() {
     const wasActive = playTurnActiveRef.current || !!playAbortRef.current;
     const settle = options?.settle !== false;
 
+    stopStorageAudio();
     if (playerNodeRef.current) {
       playerNodeRef.current.port.postMessage({ command: "reset" });
     }
@@ -286,7 +302,7 @@ export function useQuestionnaireFlow() {
     }
 
     playTurnActiveRef.current = false;
-  }, []);
+  }, [stopStorageAudio]);
 
   const ensureAudioLive = useCallback(
     async (agentSlug: string) => {
@@ -655,7 +671,7 @@ export function useQuestionnaireFlow() {
   );
 
   /**
-   * After the user stays on a question (play settled), mint reply live once.
+   * Mint reply-agent live 2s after play starts for this question.
    * One warm per question index — rapid re-schedules do not mint again.
    */
   const scheduleReplyWarm = useCallback(
@@ -705,6 +721,155 @@ export function useQuestionnaireFlow() {
   const setReplyInputBlocked = useCallback((blocked: boolean) => {
     replyInputBlockedRef.current = blocked;
   }, []);
+
+  /**
+   * Primary play path: fetch pre-recorded WAV + translated JSON from platform
+   * storage, then play via HTMLAudioElement.
+   *
+   * Next-question metadata prefetch is kicked from playQuestion (in parallel),
+   * not after this audio finishes.
+   */
+  const storageMetaCacheRef = useRef(
+    new Map<string, Promise<{ translatedText: string; audioUrl: string }>>()
+  );
+
+  const fetchStorageMeta = useCallback(
+    async (
+      questionId: string,
+      language: string,
+      signal?: AbortSignal
+    ): Promise<{ translatedText: string; audioUrl: string }> => {
+      const key = `${language}_${questionId}`;
+      const existing = storageMetaCacheRef.current.get(key);
+      if (existing) {
+        return existing;
+      }
+
+      const promise = (async () => {
+        const { apiFetch } = await import("@/lib/utils");
+        const params = new URLSearchParams({
+          locale: language,
+          question: questionId,
+        });
+        const response = await apiFetch(
+          `/api/questionnaire/storage/question?${params.toString()}`,
+          { signal, cache: "no-store" }
+        );
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => "");
+          throw new Error(
+            `Storage question fetch failed (${response.status}): ${errorText || response.statusText}`
+          );
+        }
+        const data = (await response.json()) as {
+          translatedText?: string;
+          audioUrl?: string;
+        };
+        const translatedText = (data.translatedText || "").trim();
+        const audioUrl = (data.audioUrl || "").trim();
+        if (!translatedText || !audioUrl) {
+          throw new Error("Storage question response missing text or audio");
+        }
+        return { translatedText, audioUrl };
+      })();
+
+      storageMetaCacheRef.current.set(key, promise);
+      try {
+        return await promise;
+      } catch (error) {
+        storageMetaCacheRef.current.delete(key);
+        throw error;
+      }
+    },
+    []
+  );
+
+  const prefetchNextStorageMeta = useCallback(
+    (questionIndex: number, language: string) => {
+      const question = QUESTIONS[questionIndex];
+      if (!question) return;
+      void fetchStorageMeta(question.id, language).catch(() => {
+        // Best effort — play will fetch on demand.
+      });
+    },
+    [fetchStorageMeta]
+  );
+
+  const playViaStorage = useCallback(
+    async (
+      question: Question,
+      language: string,
+      signal: AbortSignal,
+      onTranslatedText?: (text: string) => void
+    ): Promise<string> => {
+      if (signal.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+
+      const { translatedText, audioUrl } = await fetchStorageMeta(
+        question.id,
+        language,
+        signal
+      );
+      onTranslatedText?.(translatedText);
+
+      stopStorageAudio();
+      playTurnActiveRef.current = true;
+
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const audio = new Audio(audioUrl);
+          audio.preload = "auto";
+          storageAudioRef.current = audio;
+          let settled = false;
+
+          const finish = (fn: () => void) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            audio.removeEventListener("ended", onEnded);
+            audio.removeEventListener("error", onError);
+            fn();
+          };
+
+          const onEnded = () => finish(() => resolve());
+          const onError = () =>
+            finish(() => reject(new Error("Storage audio playback failed")));
+          const onAbort = () =>
+            finish(() => {
+              try {
+                audio.pause();
+              } catch {
+                // ignore
+              }
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+
+          audio.addEventListener("ended", onEnded);
+          audio.addEventListener("error", onError);
+          signal.addEventListener("abort", onAbort, { once: true });
+
+          void audio.play().catch((error) => {
+            finish(() =>
+              reject(
+                error instanceof Error
+                  ? error
+                  : new Error("Storage audio play() failed")
+              )
+            );
+          });
+        });
+      } finally {
+        if (storageAudioRef.current) {
+          storageAudioRef.current = null;
+        }
+        playTurnActiveRef.current = false;
+      }
+
+      return translatedText;
+    },
+    [fetchStorageMeta, stopStorageAudio]
+  );
 
   const playViaAgent = useCallback(
     async (
@@ -924,7 +1089,7 @@ export function useQuestionnaireFlow() {
         throw new Error("Question not found");
       }
 
-      // Do not mint reply on play start — only after settle + delay (or on Record).
+      // Do not mint reply immediately — schedule 2s after play starts.
       cancelReplyWarm();
 
       // Settle any in-flight play so a late end cannot stop this question.
@@ -941,6 +1106,11 @@ export function useQuestionnaireFlow() {
       playEpochRef.current += 1;
       const playEpoch = playEpochRef.current;
 
+      // qN reply-agent: mint 2s after this play starts (do not wait for audio end).
+      scheduleReplyWarm(questionIndex);
+      // qN+1 audio/text URL: fetch in parallel now — do not wait for qN to finish.
+      prefetchNextStorageMeta(questionIndex + 1, language);
+
       let translatedText = "";
       const notifyTranslation = (text: string) => {
         if (!text.trim()) return;
@@ -949,20 +1119,29 @@ export function useQuestionnaireFlow() {
       };
 
       try {
-        translatedText = await playViaAgent(
-          question,
-          language,
-          controller.signal,
-          notifyTranslation
-        );
-        if (
-          !controller.signal.aborted &&
-          playEpochRef.current === playEpoch
-        ) {
-          // Reply warm only — do not also mint a play standby here.
-          // Standby + reply after every question looked like duplicate reply
-          // lives and burned the stream cap. Skip/next mint play on demand.
-          scheduleReplyWarm(questionIndex);
+        // Primary: platform storage (pre-recorded wav + json translation).
+        // Fallback: live questionnaire-agent TTS/translate when storage fails.
+        try {
+          translatedText = await playViaStorage(
+            question,
+            language,
+            controller.signal,
+            notifyTranslation
+          );
+        } catch (storageError) {
+          if (controller.signal.aborted || playEpochRef.current !== playEpoch) {
+            throw storageError;
+          }
+          console.warn(
+            "[questionnaire] storage play failed; falling back to agent",
+            storageError instanceof Error ? storageError.message : storageError
+          );
+          translatedText = await playViaAgent(
+            question,
+            language,
+            controller.signal,
+            notifyTranslation
+          );
         }
       } finally {
         if (playAbortRef.current === controller) {
@@ -977,6 +1156,8 @@ export function useQuestionnaireFlow() {
       cancelPlay,
       cancelReplyWarm,
       playViaAgent,
+      playViaStorage,
+      prefetchNextStorageMeta,
       scheduleReplyWarm,
       setReplyInputBlocked,
     ]
@@ -1249,6 +1430,7 @@ export function useQuestionnaireFlow() {
   useEffect(() => {
     return () => {
       void cancelPlay({ settle: false });
+      stopStorageAudio();
       stopMic();
       stopQuestionnaireReplySession();
       disconnectLive(audioWsRef.current);
@@ -1266,7 +1448,7 @@ export function useQuestionnaireFlow() {
         });
       }
     };
-  }, [cancelPlay, discardStandby, stopMic, stopQuestionnaireReplySession]);
+  }, [cancelPlay, discardStandby, stopMic, stopQuestionnaireReplySession, stopStorageAudio]);
 
   return {
     playQuestion,

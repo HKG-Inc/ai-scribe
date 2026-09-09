@@ -1,6 +1,7 @@
 /**
  * Conversational questionnaire constants.
- * Play/record use Hikigai questionnaire agents (see hooks/useQuestionnaireFlow).
+ * Play prefers platform storage (wav + json); falls back to Hikigai
+ * questionnaire agents (see hooks/useQuestionnaireFlow).
  */
 
 export const PARENT_LANGUAGE = "en-US";
