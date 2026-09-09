@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -69,11 +70,14 @@ export async function POST(request: Request) {
     }
 
     const agentResponse = await hikigai.invokeAgent("icd-10-code-agent", { message }, HIKIGAI_AGENT_TIMEOUT_MS);
-    // console.log("[icd-10-code-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const icd_codes = normalizeIcdCodes(agentResponse);
+    logger.agentInvokeOk("icd-10-code-agent", {
+      rawResponse: agentResponse,
+      normalized: { icd_codes },
+    });
     return NextResponse.json({ icd_codes }, { status: 200 });
   } catch (error) {
+    logger.error("icd-10-code-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate ICD-10 codes";
     return NextResponse.json({ error: message }, { status: 500 });
   }

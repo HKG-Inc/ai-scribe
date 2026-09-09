@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -122,12 +123,14 @@ export async function POST(request: Request) {
       { message: messageWithDate },
       HIKIGAI_AGENT_TIMEOUT_MS
     );
-    console.log("[vaccine-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const vaccine = normalizeVaccines(agentResponse);
-    console.log("[vaccine-agent] normalized output:", JSON.stringify({ vaccine }));
+    logger.agentInvokeOk("vaccine-agent", {
+      rawResponse: agentResponse,
+      normalized: { vaccine },
+    });
     return NextResponse.json({ vaccine }, { status: 200 });
   } catch (error) {
+    logger.error("vaccine-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate vaccines";
     return NextResponse.json({ error: message }, { status: 500 });
   }

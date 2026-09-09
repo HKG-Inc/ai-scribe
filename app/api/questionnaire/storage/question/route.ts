@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { logger } from "@/lib/logger";
 import {
   fetchStorageQuestion,
   isValidStorageLocale,
@@ -48,7 +49,7 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to fetch storage question";
-    console.warn("[questionnaire/storage/question]", message);
+    logger.warn("questionnaire/storage/question", "fetch failed", { error: message });
     return NextResponse.json({ error: message }, { status: 502 });
   }
 }

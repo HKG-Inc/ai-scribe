@@ -1,4 +1,5 @@
 import { apiFetch, cleanDateValue, mapFollowUpAppointment } from "@/lib/utils";
+import { logger } from "@/lib/logger";
 import { normalizeMedicationFrequency } from "@/lib/medication";
 import { normalizeReferrals } from "@/lib/referrals";
 import type { QuestionnaireQAItem } from "@/lib/questionnaire-visit-notes";
@@ -353,7 +354,7 @@ export async function fetchOrdersPatchFromMessage(
   }
 
   if (warnings.length > 0) {
-    console.warn("[regenerate-orders] Some order agents failed:", warnings);
+    logger.warn("regenerate-orders", "some order agents failed", { warnings });
   }
 
   return patch;
@@ -414,8 +415,9 @@ export async function regenerateFromVisitNotesUpdate(options: {
   const notes = updatedVisitNotes.trim();
 
   if (agentsRequested.length === 0) {
-    console.log(
-      "[visit-notes-update] No section changes detected; skipping agent regeneration."
+    logger.info(
+      "visit-notes-update",
+      "no section changes detected; skipping agent regeneration"
     );
     return {
       patch,
@@ -426,18 +428,16 @@ export async function regenerateFromVisitNotesUpdate(options: {
     };
   }
 
-  console.log(
-    "[visit-notes-update] changed sections:",
+  logger.info("visit-notes-update", "changed sections", {
     changedSections,
-    "agents:",
-    agentsRequested
-  );
+    agents: agentsRequested,
+  });
 
   const tasks: Array<Promise<void>> = [];
 
   if (agents.has("soap")) {
     const message = buildSoapUpdateMessage(notes, questionnaireResponses);
-    console.log("[visit-notes-update] SOAP invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "soap invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{
@@ -448,7 +448,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         }>("/api/soap-notes", message);
         if (!result.ok) {
           warnings.push(`soap: ${result.error}`);
-          console.error("[visit-notes-update] SOAP failed:", result.error);
+          logger.error("visit-notes-update", "soap failed", { error: result.error });
           return;
         }
         const subjective = result.data.subjective?.trim() || "";
@@ -468,7 +468,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("medication")) {
     const message = buildMedicationUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] medication invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "medication invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ medication?: unknown[] }>(
@@ -478,7 +478,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`medication: ${result.error}`);
-          console.error("[visit-notes-update] medication failed:", result.error);
+          logger.error("visit-notes-update", "medication failed", { error: result.error });
           return;
         }
         patch.medication = {
@@ -492,7 +492,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("labtest")) {
     const message = buildLabTestsUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] labtest invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "labtest invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ lab_test?: unknown[] }>(
@@ -502,7 +502,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`labtest: ${result.error}`);
-          console.error("[visit-notes-update] labtest failed:", result.error);
+          logger.error("visit-notes-update", "labtest failed", { error: result.error });
           return;
         }
         patch.labtest = { lab_test: mapLabTests(result.data.lab_test || []) };
@@ -513,7 +513,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("procedure")) {
     const message = buildProceduresUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] procedure invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "procedure invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{
@@ -522,7 +522,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         }>("/api/procedures", message, { current_date: today });
         if (!result.ok) {
           warnings.push(`procedure: ${result.error}`);
-          console.error("[visit-notes-update] procedure failed:", result.error);
+          logger.error("visit-notes-update", "procedure failed", { error: result.error });
           return;
         }
         patch.procedure = {
@@ -535,7 +535,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("followup")) {
     const message = buildFollowUpUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] followup invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "followup invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ follow_ups?: unknown[] }>(
@@ -545,7 +545,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`followup: ${result.error}`);
-          console.error("[visit-notes-update] followup failed:", result.error);
+          logger.error("visit-notes-update", "followup failed", { error: result.error });
           return;
         }
         const firstFollowUp = (result.data.follow_ups || [])[0];
@@ -559,7 +559,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("vaccine")) {
     const message = buildVaccinesUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] vaccine invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "vaccine invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ vaccine?: unknown[] }>(
@@ -569,7 +569,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`vaccine: ${result.error}`);
-          console.error("[visit-notes-update] vaccine failed:", result.error);
+          logger.error("visit-notes-update", "vaccine failed", { error: result.error });
           return;
         }
         patch.vaccine = { vaccine: mapVaccines(result.data.vaccine || []) };
@@ -580,7 +580,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("referrals")) {
     const message = buildReferralsUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] referrals invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "referrals invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ referrals?: unknown[] }>(
@@ -589,7 +589,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`referrals: ${result.error}`);
-          console.error("[visit-notes-update] referrals failed:", result.error);
+          logger.error("visit-notes-update", "referrals failed", { error: result.error });
           return;
         }
         patch.referrals = normalizeReferrals({ referrals: result.data.referrals || [] });
@@ -600,7 +600,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("icd")) {
     const message = buildIcdUpdateMessage(notes);
-    console.log("[visit-notes-update] icd invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "icd invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{
@@ -608,7 +608,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         }>("/api/icd-10-codes", message);
         if (!result.ok) {
           warnings.push(`icd: ${result.error}`);
-          console.error("[visit-notes-update] icd failed:", result.error);
+          logger.error("visit-notes-update", "icd failed", { error: result.error });
           return;
         }
         patch.icdCodes = { icd_codes: result.data.icd_codes || [] };
@@ -619,7 +619,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("cpt")) {
     const message = buildCptUpdateMessage(notes);
-    console.log("[visit-notes-update] cpt invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "cpt invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{
@@ -627,7 +627,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         }>("/api/cpt-pipeline", message);
         if (!result.ok) {
           warnings.push(`cpt: ${result.error}`);
-          console.error("[visit-notes-update] cpt failed:", result.error);
+          logger.error("visit-notes-update", "cpt failed", { error: result.error });
           return;
         }
         patch.cptCodes = { cpt_codes: result.data.cpt_codes || [] };
@@ -638,7 +638,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("em")) {
     const message = buildEmUpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] em invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "em invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{ em_code?: string; description?: string }>(
@@ -647,7 +647,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         );
         if (!result.ok) {
           warnings.push(`em: ${result.error}`);
-          console.error("[visit-notes-update] em failed:", result.error);
+          logger.error("visit-notes-update", "em failed", { error: result.error });
           return;
         }
         patch.emCodes = {
@@ -661,7 +661,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
 
   if (agents.has("cpt2")) {
     const message = buildCpt2UpdateMessage(notes, reportData);
-    console.log("[visit-notes-update] cpt2 invoke input:", message.slice(0, 500));
+    logger.info("visit-notes-update", "cpt2 invoke input", { inputPreview: message.slice(0, 500) });
     tasks.push(
       (async () => {
         const result = await callAgentRoute<{
@@ -669,7 +669,7 @@ export async function regenerateFromVisitNotesUpdate(options: {
         }>("/api/cpt2-codes", message);
         if (!result.ok) {
           warnings.push(`cpt2: ${result.error}`);
-          console.error("[visit-notes-update] cpt2 failed:", result.error);
+          logger.error("visit-notes-update", "cpt2 failed", { error: result.error });
           return;
         }
         patch.cpt2Codes = { codes: result.data.codes || [] };
@@ -681,12 +681,9 @@ export async function regenerateFromVisitNotesUpdate(options: {
   await Promise.all(tasks);
 
   if (warnings.length > 0) {
-    console.warn("[visit-notes-update] Some agents failed:", warnings);
+    logger.warn("visit-notes-update", "some agents failed", { warnings });
   } else {
-    console.log(
-      "[visit-notes-update] All requested agents succeeded:",
-      agentsSucceeded
-    );
+    logger.info("visit-notes-update", "all requested agents succeeded", { agentsSucceeded });
   }
 
   return {

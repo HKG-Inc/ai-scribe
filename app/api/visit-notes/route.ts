@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 import {
   buildQuestionnaireCombinedMessage,
   extractAgentOutput,
@@ -121,16 +122,15 @@ export async function POST(request: Request) {
       ),
     ]);
 
-    console.log(
-      "\n [questionnaire-visit-notes] raw invoke outputs:",
-      JSON.stringify({
+    logger.agentInvokeOk("questionnaire-visit-notes", {
+      rawResponse: {
         chief_complaint: ccRaw,
         msk: mskRaw,
         tbi: tbiRaw,
         medical: medRaw,
         functionality: funcRaw,
-      })
-    );
+      },
+    });
 
     const merged = mergeQuestionnaireAgentOutputs({
       chiefComplaint: extractAgentOutput(ccRaw),
@@ -151,6 +151,7 @@ export async function POST(request: Request) {
       { status: 200 }
     );
   } catch (error) {
+    logger.error("questionnaire-visit-notes", "route failed", errorFields(error));
     const message =
       error instanceof Error ? error.message : "Failed to generate visit notes";
     return NextResponse.json({ error: message }, { status: 500 });

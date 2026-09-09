@@ -1,3 +1,5 @@
+import { logger } from "@/lib/logger";
+
 export const HIKIGAI_AGENT_TIMEOUT_MS = 300000;
 export const HIKIGAI_BACKEND_URL_DEFAULT = "https://backend.hikigaiplatform.io";
 
@@ -110,15 +112,13 @@ export class HikigaiClient {
 
 		if (!response.ok) {
 			const error = await response.text();
-			console.error(
-				"[hikigai] auth token exchange failed:",
-				JSON.stringify({
-					status: response.status,
-					statusText: response.statusText,
-					url,
-					error,
-				})
-			);
+			logger.agentInvokeError("hikigai-auth", {
+				url,
+				status: response.status,
+				statusText: response.statusText,
+				rawResponse: error,
+				phase: "auth",
+			});
 			throw new Error(`Hikigai Auth Token Exchange Failed: ${error}`);
 		}
 
@@ -130,13 +130,11 @@ export class HikigaiClient {
 			data?.data?.access_token;
 
 		if (!token || typeof token !== "string") {
-			console.error(
-				"[hikigai] auth token exchange failed:",
-				JSON.stringify({
-					url,
-					error: "Token not found in response",
-				})
-			);
+			logger.agentInvokeError("hikigai-auth", {
+				url,
+				rawResponse: "Token not found in response",
+				phase: "auth",
+			});
 			throw new Error("Hikigai Auth Token Exchange Failed: Token not found in response");
 		}
 
@@ -200,15 +198,13 @@ export class HikigaiClient {
 
 			if (!response.ok) {
 				const error = await response.text();
-				console.error(
-					`[${agentSlug}] invoke error:`,
-					JSON.stringify({
-						status: response.status,
-						statusText: response.statusText,
-						url,
-						error,
-					})
-				);
+				logger.agentInvokeError(agentSlug, {
+					url,
+					status: response.status,
+					statusText: response.statusText,
+					rawResponse: error,
+					phase: "http",
+				});
 				throw new Error(`Hikigai Agent Invocation Failed: ${error}`);
 			}
 
@@ -220,13 +216,16 @@ export class HikigaiClient {
 				!message.startsWith("Hikigai Agent Invocation Failed:") &&
 				!message.startsWith("Hikigai Auth Token Exchange Failed:")
 			) {
-				console.error(
-					`[${agentSlug}] invoke error:`,
-					JSON.stringify({
-						url,
-						error: message,
-					})
-				);
+				const phase =
+					message.includes("timed out") || message.includes("timeout")
+						? "timeout"
+						: "network";
+				logger.agentInvokeError(agentSlug, {
+					url,
+					rawResponse: message,
+					cause: error,
+					phase,
+				});
 			}
 			throw error;
 		}

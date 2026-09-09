@@ -40,6 +40,7 @@ import {
 import { VisitNotesFormatted } from "@/components/report/VisitNotesFormatted";
 import { formatReferralUrgency } from "@/lib/referrals";
 import { chargeVisitMinutesIfNeeded, resolveDoctorId } from "@/lib/auth/minutes";
+import { errorFields, logger } from "@/lib/logger";
 import { exportVisitReportPdf } from "@/lib/report-pdf";
 import { toUserFacingApiError } from "@/lib/api-errors";
 import {
@@ -381,7 +382,9 @@ function MedicalNotesTab({
       }
 
       if (result.warnings.length > 0) {
-        console.warn("[handleSaveVisitNotes] agent warnings:", result.warnings);
+        logger.warn("handleSaveVisitNotes", "agent warnings", {
+          warnings: result.warnings,
+        });
         toast.error(
           `Visit notes saved, but ${result.warnings.length} section(s) failed to refresh.`
         );
@@ -391,7 +394,7 @@ function MedicalNotesTab({
         toast.success("Visit notes updated.");
       }
     } catch (error) {
-      console.error("[handleSaveVisitNotes] error:", error);
+      logger.error("handleSaveVisitNotes", "save failed", errorFields(error));
       toast.error(
         toUserFacingApiError(
           error,

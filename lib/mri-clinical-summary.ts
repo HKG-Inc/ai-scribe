@@ -1,4 +1,5 @@
 import { hikigai, type AgentAttachment } from "@/lib/hikigai";
+import { logger } from "@/lib/logger";
 import {
   decodeTextFile,
   extractTextFromDoc,
@@ -73,9 +74,11 @@ async function invokeOcrPage(
     MRI_AGENT_TIMEOUT_MS,
     attachments
   );
-  console.log(
-    `[mri-report-ocr-agent] ${filename} page ${pageNumber} took ${ms(startedAt)}ms`
-  );
+  logger.info("mri-report-ocr-agent", "page OCR complete", {
+    filename,
+    pageNumber,
+    durationMs: ms(startedAt),
+  });
 
   const output = extractMriAgentOutput(raw);
   const extracted =
@@ -110,9 +113,11 @@ async function ocrScannedDoc(
     const [jpeg] = renderPageRangeJpeg(doc, pageNumber - 1, pageNumber);
     pages.push({ pageNumber, jpeg });
   }
-  console.log(
-    `[mri-ocr] ${filename} rendered ${pageCount} JPEG(s) in ${ms(renderStartedAt)}ms`
-  );
+  logger.info("mri-ocr", "JPEG render complete", {
+    filename,
+    pageCount,
+    durationMs: ms(renderStartedAt),
+  });
 
   const ocrStartedAt = performance.now();
   const pageResults = await Promise.all(
@@ -120,9 +125,11 @@ async function ocrScannedDoc(
       invokeOcrPage(filename, pageNumber, jpeg)
     )
   );
-  console.log(
-    `[mri-ocr] ${filename} parallel OCR wall time ${ms(ocrStartedAt)}ms (${pageCount} page invokes)`
-  );
+  logger.info("mri-ocr", "parallel OCR complete", {
+    filename,
+    pageCount,
+    durationMs: ms(ocrStartedAt),
+  });
 
   return pageResults
     .sort((a, b) => a.startPage - b.startPage)
@@ -150,9 +157,9 @@ export async function extractFileText(file: MriInputFile): Promise<string> {
       const digital = extractTextFromDoc(doc).trim();
       if (digital) return digital;
 
-      console.warn(
-        `[mri-pipeline] digital extract empty for ${file.filename}; falling back to OCR`
-      );
+      logger.warn("mri-pipeline", "digital extract empty; falling back to OCR", {
+        filename: file.filename,
+      });
       return ocrScannedDoc(file.filename, doc);
     } finally {
       doc.destroy();
@@ -179,17 +186,20 @@ async function summarizeExtractedReport(file: {
     { message },
     MRI_AGENT_TIMEOUT_MS
   );
-  console.log(
-    `[mri-clinical-summary-agent] ${file.filename} took ${ms(summaryStartedAt)}ms`,
-    describeMriAgentEnvelope(raw)
-  );
+  logger.info("mri-clinical-summary-agent", "summary complete", {
+    filename: file.filename,
+    durationMs: ms(summaryStartedAt),
+    envelope: describeMriAgentEnvelope(raw),
+    rawResponse: raw,
+  });
 
   const data = parseSummaryOutput(raw);
   if (!data.studies.length) {
-    console.warn(
-      `[mri-clinical-summary-agent] no studies parsed for ${file.filename}:`,
-      describeMriAgentEnvelope(raw)
-    );
+    logger.warn("mri-clinical-summary-agent", "no studies parsed", {
+      filename: file.filename,
+      envelope: describeMriAgentEnvelope(raw),
+      rawResponse: raw,
+    });
     throw new Error(
       `Summary agent returned no studies for ${file.filename} (${describeMriAgentEnvelope(raw)})`
     );
@@ -227,9 +237,9 @@ export async function generateMriClinicalSummary(
       return { filename: file.filename, text: text.trim() };
     })
   );
-  console.log(
-    `[mri-pipeline] text extraction (incl. OCR) took ${ms(extractStartedAt)}ms`
-  );
+  logger.info("mri-pipeline", "text extraction complete", {
+    durationMs: ms(extractStartedAt),
+  });
 
   await authReady;
 
@@ -249,9 +259,10 @@ export async function generateMriClinicalSummary(
   const summaries = await Promise.all(
     extracted.map((file) => summarizeExtractedReport(file))
   );
-  console.log(
-    `[mri-pipeline] ${summaries.length} summary agent call(s) took ${ms(summaryStartedAt)}ms`
-  );
+  logger.info("mri-pipeline", "summary agent calls complete", {
+    summaryCount: summaries.length,
+    durationMs: ms(summaryStartedAt),
+  });
 
   const studies = summaries.flatMap((summary) => summary.studies);
   if (!studies.length) {
@@ -276,9 +287,10 @@ export async function generateMriClinicalSummary(
     summaries.find((summary) => summary.patient_label.trim())?.patient_label ||
     "PATIENT 1";
 
-  console.log(
-    `[mri-pipeline] total wall time ${ms(pipelineStartedAt)}ms (${studies.length} study/studies)`
-  );
+  logger.info("mri-pipeline", "pipeline complete", {
+    durationMs: ms(pipelineStartedAt),
+    studyCount: studies.length,
+  });
 
   return { patient_label, studies };
 }

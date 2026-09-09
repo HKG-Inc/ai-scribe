@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -64,12 +65,15 @@ export async function POST(request: Request) {
       : { message };
 
     const agentResponse = await hikigai.invokeAgent("soap-notes-agent", input, HIKIGAI_AGENT_TIMEOUT_MS);
-    // console.log("[soap-notes-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const output = normalizeSoapOutput(agentResponse);
+    logger.agentInvokeOk("soap-notes-agent", {
+      rawResponse: agentResponse,
+      normalized: output,
+    });
 
     return NextResponse.json(output, { status: 200 });
   } catch (error) {
+    logger.error("soap-notes-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate soap notes";
     return NextResponse.json({ error: message }, { status: 500 });
   }

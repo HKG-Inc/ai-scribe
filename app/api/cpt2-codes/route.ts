@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { isAgentUnavailableError, toUserFacingApiError } from "@/lib/api-errors";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -77,21 +78,26 @@ export async function POST(request: Request) {
       { message },
       HIKIGAI_AGENT_TIMEOUT_MS
     );
-    console.log("[cpt2-code-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const codes = normalizeCpt2Codes(agentResponse);
-    console.log("[cpt2-code-agent] normalized output:", JSON.stringify({ codes }));
+    logger.agentInvokeOk("cpt2-code-agent", {
+      rawResponse: agentResponse,
+      normalized: { codes },
+      extra: { agentSlug: CPT2_AGENT_SLUG },
+    });
     return NextResponse.json({ codes }, { status: 200 });
   } catch (error) {
     if (isAgentUnavailableError(error)) {
-      console.warn(
-        `[cpt2-code-agent] ${CPT2_AGENT_SLUG} unavailable (404), returning empty codes:`,
-        error
-      );
+      logger.warn("cpt2-code-agent", "agent unavailable (404), returning empty codes", {
+        agentSlug: CPT2_AGENT_SLUG,
+        ...errorFields(error),
+      });
       return NextResponse.json({ codes: [] }, { status: 200 });
     }
 
-    console.error("[cpt2-code-agent] error:", error);
+    logger.error("cpt2-code-agent", "route failed", {
+      agentSlug: CPT2_AGENT_SLUG,
+      ...errorFields(error),
+    });
     return NextResponse.json(
       {
         error: toUserFacingApiError(
