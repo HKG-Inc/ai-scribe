@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 import { normalizeMedicationFrequency } from "@/lib/medication";
 
 export const maxDuration = 300;
@@ -110,19 +111,20 @@ export async function POST(request: Request) {
     }
 
     const agentInput = { message, current_date };
-    console.log("[medication-agent] invoke input:", JSON.stringify(agentInput));
-
     const agentResponse = await hikigai.invokeAgent(
       "medication-agent",
       agentInput,
       HIKIGAI_AGENT_TIMEOUT_MS
     );
-    console.log("[medication-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const medication = normalizeMedication(agentResponse);
-    console.log("[medication-agent] normalized output:", JSON.stringify({ medication }));
+    logger.agentInvokeOk("medication-agent", {
+      rawResponse: agentResponse,
+      normalized: { medication },
+      extra: { invokeInput: agentInput },
+    });
     return NextResponse.json({ medication }, { status: 200 });
   } catch (error) {
+    logger.error("medication-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate medication data";
     return NextResponse.json({ error: message }, { status: 500 });
   }

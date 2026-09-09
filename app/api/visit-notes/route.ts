@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -50,11 +51,15 @@ export async function POST(request: Request) {
       : { message, speciality: "general" };
 
     const agentResponse = await hikigai.invokeAgent("visit-notes-agent", input, HIKIGAI_AGENT_TIMEOUT_MS);
-    console.log("\n [visit-notes-agent] raw invoke output:", JSON.stringify(agentResponse));
     const visitNotes = extractVisitNotes(agentResponse);
+    logger.agentInvokeOk("visit-notes-agent", {
+      rawResponse: agentResponse,
+      normalized: { visit_notes: visitNotes },
+    });
 
     return NextResponse.json({ visit_notes: visitNotes }, { status: 200 });
   } catch (error) {
+    logger.error("visit-notes-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate visit notes";
     return NextResponse.json({ error: message }, { status: 500 });
   }

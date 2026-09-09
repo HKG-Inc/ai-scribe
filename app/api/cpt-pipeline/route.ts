@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -109,12 +110,15 @@ export async function POST(request: Request) {
     }
 
     const agentResponse = await hikigai.invokeAgent("cpt-coding-pipeline", { message }, HIKIGAI_AGENT_TIMEOUT_MS);
-    // console.log("[cpt-coding-pipeline] raw invoke output:", JSON.stringify(agentResponse));
-
     const procedures = normalizeProcedures(agentResponse);
     const cpt_codes = normalizeCptCodes(agentResponse);
+    logger.agentInvokeOk("cpt-coding-pipeline", {
+      rawResponse: agentResponse,
+      normalized: { procedures, cpt_codes },
+    });
     return NextResponse.json({ procedures, cpt_codes }, { status: 200 });
   } catch (error) {
+    logger.error("cpt-coding-pipeline", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate CPT pipeline";
     return NextResponse.json({ error: message }, { status: 500 });
   }

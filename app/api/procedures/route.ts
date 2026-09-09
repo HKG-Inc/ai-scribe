@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -172,19 +173,20 @@ export async function POST(request: Request) {
 
     const current_date = body.current_date?.trim() || todayMMDDYYYY();
     const agentInput = { transcription: message, current_date };
-    console.log("[procedure-agent] invoke input:", JSON.stringify(agentInput));
-
     const agentResponse = await hikigai.invokeAgent(
       "procedure-agent",
       agentInput,
       HIKIGAI_AGENT_TIMEOUT_MS
     );
-    console.log("[procedure-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const procedure = collectProcedureEntries(agentResponse);
-    console.log("[procedure-agent] normalized output:", JSON.stringify({ procedure }));
+    logger.agentInvokeOk("procedure-agent", {
+      rawResponse: agentResponse,
+      normalized: { procedure },
+      extra: { invokeInput: agentInput },
+    });
     return NextResponse.json({ procedure }, { status: 200 });
   } catch (error) {
+    logger.error("procedure-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate procedures";
     return NextResponse.json({ error: message }, { status: 500 });
   }

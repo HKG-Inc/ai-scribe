@@ -36,6 +36,7 @@ import { QRCodeDialog } from "@/components/recording/Dialogs";
 import { ReportView } from "@/components/report/ReportView";
 import type { AlertType } from "@/components/recording/AlertBanners";
 import { chargeVisitMinutesIfNeeded } from "@/lib/auth/minutes";
+import { errorFields, logger } from "@/lib/logger";
 import { apiFetch, cleanDateValue, mapFollowUpAppointment } from "@/lib/utils";
 import { normalizeMedicationFrequency } from "@/lib/medication";
 import { normalizeReferrals } from "@/lib/referrals";
@@ -495,7 +496,7 @@ export default function RecordingPage() {
           );
         }
       } catch (error) {
-        console.error("[generateReport] Transcription formatter error:", error);
+        logger.error("generateReport", "transcription formatter error", errorFields(error));
       } finally {
         finishSection("transcription");
       }
@@ -504,7 +505,7 @@ export default function RecordingPage() {
     const runVisitNotes = async () => {
       const result = await callAgentRoute<{ visit_notes?: string[] }>("/api/visit-notes");
       if (!result.ok) {
-        console.warn("[generateReport] Visit notes failed:", result.error);
+        logger.warn("generateReport", "Visit notes failed", { error: result.error });
         finishSection("visitNotes");
         return;
       }
@@ -525,7 +526,7 @@ export default function RecordingPage() {
         plan?: string;
       }>("/api/soap-notes");
       if (!result.ok) {
-        console.warn("[generateReport] SOAP notes failed:", result.error);
+        logger.warn("generateReport", "SOAP notes failed", { error: result.error });
         finishSection("soapNote");
         return;
       }
@@ -548,7 +549,7 @@ export default function RecordingPage() {
         icd_codes?: Array<{ icd_10_code: string; name: string }>;
       }>("/api/icd-10-codes");
       if (!result.ok) {
-        console.warn("[generateReport] ICD-10 failed:", result.error);
+        logger.warn("generateReport", "ICD-10 failed", { error: result.error });
         finishSection("icdCodes");
         return;
       }
@@ -562,7 +563,7 @@ export default function RecordingPage() {
         codes?: Array<{ cpt2_code: string; description: string }>;
       }>("/api/cpt2-codes");
       if (!result.ok) {
-        console.warn("[generateReport] CPT-2 failed:", result.error);
+        logger.warn("generateReport", "CPT-2 failed", { error: result.error });
         finishSection("cpt2Codes");
         return;
       }
@@ -577,7 +578,7 @@ export default function RecordingPage() {
         { current_date: today }
       );
       if (!result.ok) {
-        console.warn("[generateReport] Follow-up failed:", result.error);
+        logger.warn("generateReport", "Follow-up failed", { error: result.error });
         finishSection("followup");
         return;
       }
@@ -592,7 +593,7 @@ export default function RecordingPage() {
         "/api/em-code"
       );
       if (!result.ok) {
-        console.warn("[generateReport] E&M failed:", result.error);
+        logger.warn("generateReport", "E&M failed", { error: result.error });
         finishSection("emCodes");
         return;
       }
@@ -609,7 +610,7 @@ export default function RecordingPage() {
         current_date: today,
       });
       if (!result.ok) {
-        console.warn("[generateReport] Medication failed:", result.error);
+        logger.warn("generateReport", "Medication failed", { error: result.error });
         finishSection("medication");
         return;
       }
@@ -740,7 +741,7 @@ export default function RecordingPage() {
         procedures?: unknown[];
       }>("/api/procedures", { current_date: today });
       if (!result.ok) {
-        console.warn("[generateReport] Procedures failed:", result.error);
+        logger.warn("generateReport", "Procedures failed", { error: result.error });
         finishSection("procedure");
         return;
       }
@@ -755,7 +756,7 @@ export default function RecordingPage() {
     const runReferrals = async () => {
       const result = await callAgentRoute<{ referrals?: unknown[] }>("/api/referrals");
       if (!result.ok) {
-        console.warn("[generateReport] Referrals failed:", result.error);
+        logger.warn("generateReport", "Referrals failed", { error: result.error });
         finishSection("referrals");
         return;
       }
@@ -770,7 +771,7 @@ export default function RecordingPage() {
         cpt_codes?: Array<{ cpt_code: string; name: string }>;
       }>("/api/cpt-pipeline");
       if (!result.ok) {
-        console.warn("[generateReport] CPT pipeline failed:", result.error);
+        logger.warn("generateReport", "CPT pipeline failed", { error: result.error });
         finishSection("cptCodes");
         return;
       }
@@ -796,7 +797,7 @@ export default function RecordingPage() {
         current_date: today,
       });
       if (!result.ok) {
-        console.warn("[generateReport] Lab tests failed:", result.error);
+        logger.warn("generateReport", "Lab tests failed", { error: result.error });
         finishSection("labtest");
         return;
       }
@@ -842,7 +843,7 @@ export default function RecordingPage() {
         current_date: today,
       });
       if (!result.ok) {
-        console.warn("[generateReport] Vaccines failed:", result.error);
+        logger.warn("generateReport", "Vaccines failed", { error: result.error });
         finishSection("vaccine");
         return;
       }

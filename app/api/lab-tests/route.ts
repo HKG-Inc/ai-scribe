@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -84,12 +85,14 @@ export async function POST(request: Request) {
       { transcription: message, current_date },
       HIKIGAI_AGENT_TIMEOUT_MS
     );
-    console.log("[lab-test-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const lab_test = normalizeLabTests(agentResponse);
-    console.log("[lab-test-agent] normalized output:", JSON.stringify({ lab_test }));
+    logger.agentInvokeOk("lab-test-agent", {
+      rawResponse: agentResponse,
+      normalized: { lab_test },
+    });
     return NextResponse.json({ lab_test }, { status: 200 });
   } catch (error) {
+    logger.error("lab-test-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate lab tests";
     return NextResponse.json({ error: message }, { status: 500 });
   }

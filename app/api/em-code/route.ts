@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -43,10 +44,14 @@ export async function POST(request: Request) {
     }
 
     const agentResponse = await hikigai.invokeAgent("em-code-agent", { message }, HIKIGAI_AGENT_TIMEOUT_MS);
-    // console.log("[em-code-agent] raw invoke output:", JSON.stringify(agentResponse));
-
-    return NextResponse.json(normalizeEmCode(agentResponse), { status: 200 });
+    const normalized = normalizeEmCode(agentResponse);
+    logger.agentInvokeOk("em-code-agent", {
+      rawResponse: agentResponse,
+      normalized,
+    });
+    return NextResponse.json(normalized, { status: 200 });
   } catch (error) {
+    logger.error("em-code-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate E&M code";
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -1,3 +1,5 @@
+import { logger } from "@/lib/logger";
+
 export const HIKIGAI_AGENT_TIMEOUT_MS = 300000;
 export const HIKIGAI_BACKEND_URL_DEFAULT = "https://backend.hikigaiplatform.io";
 
@@ -96,6 +98,13 @@ export class HikigaiClient {
 
 		if (!response.ok) {
 			const error = await response.text();
+			logger.agentInvokeError("hikigai-auth", {
+				url,
+				status: response.status,
+				statusText: response.statusText,
+				rawResponse: error,
+				phase: "auth",
+			});
 			throw new Error(`Hikigai Auth Token Exchange Failed: ${error}`);
 		}
 
@@ -107,6 +116,11 @@ export class HikigaiClient {
 			data?.data?.access_token;
 
 		if (!token || typeof token !== "string") {
+			logger.agentInvokeError("hikigai-auth", {
+				url,
+				rawResponse: "Token not found in response",
+				phase: "auth",
+			});
 			throw new Error("Hikigai Auth Token Exchange Failed: Token not found in response");
 		}
 
@@ -127,46 +141,65 @@ export class HikigaiClient {
 		}
 
 		const url = `${this.backendUrl}/api/v1/agents/${agentSlug}/invoke`;
-		let token = await this.getAuthToken(false, timeoutMs);
 
-		let response = await this.fetchWithTimeout(
-			url,
-			{
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${token}`,
-				"X-Project-ID": this.projectId,
-			},
-			body: this.buildInvokeBody(input, timeoutMs),
-			},
-			timeoutMs
-		);
+		try {
+			let token = await this.getAuthToken(false, timeoutMs);
 
-		// If the token expired, refresh once and retry.
-		if (response.status === 401) {
-			token = await this.getAuthToken(true, timeoutMs);
-			response = await this.fetchWithTimeout(
-				url,
-				{
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${token}`,
-					"X-Project-ID": this.projectId,
-				},
-				body: this.buildInvokeBody(input, timeoutMs),
-				},
-				timeoutMs
-			);
+			const post = (authToken: string) =>
+				this.fetchWithTimeout(
+					url,
+					{
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+							Authorization: `Bearer ${authToken}`,
+							"X-Project-ID": this.projectId,
+						},
+						body: this.buildInvokeBody(input, timeoutMs),
+					},
+					timeoutMs
+				);
+
+			let response = await post(token);
+
+			// If the token expired, refresh once and retry.
+			if (response.status === 401) {
+				token = await this.getAuthToken(true, timeoutMs);
+				response = await post(token);
+			}
+
+			if (!response.ok) {
+				const error = await response.text();
+				logger.agentInvokeError(agentSlug, {
+					url,
+					status: response.status,
+					statusText: response.statusText,
+					rawResponse: error,
+					phase: "http",
+				});
+				throw new Error(`Hikigai Agent Invocation Failed: ${error}`);
+			}
+
+			return await response.json();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (
+				!message.startsWith("Hikigai Agent Invocation Failed:") &&
+				!message.startsWith("Hikigai Auth Token Exchange Failed:")
+			) {
+				const phase =
+					message.includes("timed out") || message.includes("timeout")
+						? "timeout"
+						: "network";
+				logger.agentInvokeError(agentSlug, {
+					url,
+					rawResponse: message,
+					cause: error,
+					phase,
+				});
+			}
+			throw error;
 		}
-
-		if (!response.ok) {
-			const error = await response.text();
-			throw new Error(`Hikigai Agent Invocation Failed: ${error}`);
-		}
-
-		return await response.json();
 	}
 }
 

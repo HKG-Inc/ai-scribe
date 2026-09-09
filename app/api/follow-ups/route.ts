@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -49,11 +50,14 @@ export async function POST(request: Request) {
       message,
       current_date,
     }, HIKIGAI_AGENT_TIMEOUT_MS);
-    // console.log("[follow-up-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const follow_ups = normalizeFollowUps(agentResponse);
+    logger.agentInvokeOk("follow-up-agent", {
+      rawResponse: agentResponse,
+      normalized: { follow_ups },
+    });
     return NextResponse.json({ follow_ups }, { status: 200 });
   } catch (error) {
+    logger.error("follow-up-agent", "route failed", errorFields(error));
     const message = error instanceof Error ? error.message : "Failed to generate follow-up data";
     return NextResponse.json({ error: message }, { status: 500 });
   }

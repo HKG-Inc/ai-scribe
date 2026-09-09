@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { toUserFacingApiError } from "@/lib/api-errors";
 import { HIKIGAI_AGENT_TIMEOUT_MS, hikigai } from "@/lib/hikigai";
+import { errorFields, logger } from "@/lib/logger";
 
 export const maxDuration = 300;
 
@@ -70,13 +71,14 @@ export async function POST(request: Request) {
     }
 
     const agentResponse = await hikigai.invokeAgent("cpt2-code-agent", { message }, HIKIGAI_AGENT_TIMEOUT_MS);
-    console.log("[cpt2-code-agent] raw invoke output:", JSON.stringify(agentResponse));
-
     const codes = normalizeCpt2Codes(agentResponse);
-    console.log("[cpt2-code-agent] normalized output:", JSON.stringify({ codes }));
+    logger.agentInvokeOk("cpt2-code-agent", {
+      rawResponse: agentResponse,
+      normalized: { codes },
+    });
     return NextResponse.json({ codes }, { status: 200 });
   } catch (error) {
-    console.error("[cpt2-code-agent] error:", error);
+    logger.error("cpt2-code-agent", "route failed", errorFields(error));
     return NextResponse.json(
       {
         error: toUserFacingApiError(
