@@ -1,6 +1,6 @@
 import type { AppDispatch } from "@/store";
 import { setUser } from "@/store/slices/userSlice";
-import { setVisitMinutesCharged } from "@/store/slices/recordingSlice";
+import { setChargedRecordingSeconds } from "@/store/slices/recordingSlice";
 import { getIdentitySession } from "@/lib/auth/session";
 import { apiFetch } from "@/lib/utils";
 
@@ -102,21 +102,25 @@ export async function syncMinutesLeft(dispatch: AppDispatch): Promise<void> {
   }
 }
 
+/**
+ * Deduct subscription minutes for active recording time not yet billed this visit.
+ * Safe to call on Stop Recording and again on End Visit / logout — only the
+ * uncharged delta is sent to the API.
+ */
 export async function chargeVisitMinutesIfNeeded(
   dispatch: AppDispatch,
-  recordingTimeSeconds: number,
-  visitMinutesCharged: boolean
+  recordingTimeSeconds: number
 ): Promise<void> {
-  if (visitMinutesCharged) return;
+  const { store } = await import("@/store");
+  const chargedSeconds = store.getState().recording.chargedRecordingSeconds ?? 0;
+  const unchargedSeconds = Math.max(0, recordingTimeSeconds - chargedSeconds);
+  const minutesToDeduct = recordingSecondsToBillableMinutes(unchargedSeconds);
 
-  const minutesToDeduct = recordingSecondsToBillableMinutes(recordingTimeSeconds);
   if (minutesToDeduct === 0) {
-    dispatch(setVisitMinutesCharged(true));
     return;
   }
 
   try {
-    const { store } = await import("@/store");
     const { doctorId, doctorName, currentBalance } = readDoctorFromStore(store);
 
     if (!doctorId) {
@@ -150,7 +154,7 @@ export async function chargeVisitMinutesIfNeeded(
     );
 
     dispatch(setUser({ totalMinutesLeft: newBalance }));
-    dispatch(setVisitMinutesCharged(true));
+    dispatch(setChargedRecordingSeconds(recordingTimeSeconds));
   } catch (error) {
     console.error("Failed to deduct visit minutes:", error);
   }

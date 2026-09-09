@@ -142,7 +142,8 @@ export interface RecordingState {
   showQRCode: boolean;
   showUserSidebar: boolean;
   showPremiumBanner: boolean;
-  visitMinutesCharged: boolean;
+  /** Active recording seconds already billed this visit (supports Stop + Back to Recording). */
+  chargedRecordingSeconds: number;
   medicalNotesFeedbackRating: "up" | "down" | null;
   ordersFeedbackRating: "up" | "down" | null;
 }
@@ -226,7 +227,7 @@ const initialState: RecordingState = {
   showQRCode: false,
   showUserSidebar: false,
   showPremiumBanner: true,
-  visitMinutesCharged: false,
+  chargedRecordingSeconds: 0,
   medicalNotesFeedbackRating: null,
   ordersFeedbackRating: null,
 };
@@ -247,7 +248,7 @@ const recordingSlice = createSlice({
       state.reportLoading = false;
       state.reportSectionLoading = createSectionLoading(false);
       state.recordingTime = 0;
-      state.visitMinutesCharged = false;
+      state.chargedRecordingSeconds = 0;
       state.medicalNotesFeedbackRating = null;
       state.ordersFeedbackRating = null;
       state.questionnaireStarted = false;
@@ -463,8 +464,8 @@ const recordingSlice = createSlice({
     setSessionId(state, action: PayloadAction<string>) {
       state.sessionId = action.payload;
     },
-    setVisitMinutesCharged(state, action: PayloadAction<boolean>) {
-      state.visitMinutesCharged = action.payload;
+    setChargedRecordingSeconds(state, action: PayloadAction<number>) {
+      state.chargedRecordingSeconds = Math.max(0, action.payload);
     },
     updateVisitNote(state, action: PayloadAction<string>) {
       if (state.reportData) {
@@ -527,7 +528,7 @@ export const {
   setPendingBufferCount,
   setConnectionState,
   setSessionId,
-  setVisitMinutesCharged,
+  setChargedRecordingSeconds,
   updateVisitNote,
   setMedicalNotesFeedbackRating,
   setOrdersFeedbackRating,

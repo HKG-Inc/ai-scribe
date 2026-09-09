@@ -1868,7 +1868,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
   const router = useRouter();
   const pathname = usePathname();
   const isVisitDetailsRoute = withoutBasePath(pathname ?? "") === "/visit-details";
-  const { reportData, visitId, transcription, formattedTranscription, recordingTime, visitMinutesCharged, qaHistory } = useAppSelector((s) => s.recording);
+  const { reportData, visitId, transcription, formattedTranscription, recordingTime, qaHistory } = useAppSelector((s) => s.recording);
   const mriReport = useAppSelector((s) => s.recording.mriReport);
   const transcriptMessage = buildTranscriptMessage(transcription);
   const displayTranscription = formattedTranscription ?? transcription;
@@ -1908,7 +1908,8 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
     setIsEndingVisit(true);
     try {
       onBeforeEndVisit?.();
-      await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
+      // Safety net: Stop Recording already bills; this only charges any remaining delta.
+      await chargeVisitMinutesIfNeeded(dispatch, recordingTime);
       dispatch(endVisit());
       if (isVisitDetailsRoute) {
         router.push("/recording");

@@ -52,9 +52,7 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
   const dispatch = useAppDispatch();
   const router = useRouter();
   const user = useAppSelector((s) => s.user);
-  const { visitId, showPremiumBanner, recordingTime, visitMinutesCharged } = useAppSelector(
-    (s) => s.recording
-  );
+  const { visitId, showPremiumBanner, recordingTime } = useAppSelector((s) => s.recording);
   const [isEndingVisit, setIsEndingVisit] = useState(false);
   const doctorId = useCompanionDoctorId();
   const canShowQr = !!visitId && !!doctorId;
@@ -67,7 +65,8 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
     setIsEndingVisit(true);
     try {
       onBeforeEndVisit?.();
-      await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
+      // Safety net: Stop Recording already bills; this only charges any remaining delta.
+      await chargeVisitMinutesIfNeeded(dispatch, recordingTime);
       dispatch(endVisit());
     } finally {
       setIsEndingVisit(false);
@@ -156,7 +155,7 @@ export function UserProfileSidebar({
   const router = useRouter();
   const user = useAppSelector((s) => s.user);
   const showSidebar = useAppSelector((s) => s.recording.showUserSidebar);
-  const { recordingTime, visitMinutesCharged } = useAppSelector((s) => s.recording);
+  const { recordingTime } = useAppSelector((s) => s.recording);
 
   const [firstName, setFirstName] = useState(user.firstName);
   const [lastName, setLastName] = useState(user.lastName);
@@ -458,7 +457,8 @@ export function UserProfileSidebar({
     }
     clearIdentitySession();
     onBeforeEndVisit?.();
-    await chargeVisitMinutesIfNeeded(dispatch, recordingTime, visitMinutesCharged);
+    // Safety net for any uncharged recording time before logout clears the visit.
+    await chargeVisitMinutesIfNeeded(dispatch, recordingTime);
     dispatch(logout());
     dispatch(endVisit());
     router.push("/login");

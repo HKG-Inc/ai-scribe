@@ -197,11 +197,7 @@ export default function RecordingPage() {
         disconnect();
       }
       const state = store.getState().recording;
-      void chargeVisitMinutesIfNeeded(
-        dispatch,
-        state.recordingTime,
-        state.visitMinutesCharged
-      ).then(() => {
+      void chargeVisitMinutesIfNeeded(dispatch, state.recordingTime).then(() => {
         dispatch(endVisit());
       });
     },
@@ -973,7 +969,6 @@ export default function RecordingPage() {
     try {
       const visitIdAtStop = recording.visitId;
       const recordingTimeAtStop = recording.recordingTime;
-      const visitMinutesChargedAtStop = recording.visitMinutesCharged;
       const companionDriven = companionDrivenRef.current;
 
       setAlerts([]);
@@ -1018,12 +1013,8 @@ export default function RecordingPage() {
       if (!transcriptMessage && !hasQuestionnaireContent) {
         endingVisitRef.current = true;
         companionTranscript.endVisit();
-        // Empty visit ends here — deduct cumulative active recording time.
-        await chargeVisitMinutesIfNeeded(
-          dispatch,
-          recordingTimeAtStop,
-          visitMinutesChargedAtStop
-        );
+        // Empty visit ends here — deduct any uncharged active recording time.
+        await chargeVisitMinutesIfNeeded(dispatch, recordingTimeAtStop);
         // Fully reset state so Start Visit button reappears
         dispatch(endVisit());
         setNoTranscriptToast(true);
@@ -1054,9 +1045,18 @@ export default function RecordingPage() {
         return;
       }
 
-      // Minutes are deducted only at End Visit (or logout), not on Stop,
-      // so Back to Recording can accumulate more active time for the same visit.
+      // Deduct uncharged active recording time on Stop so refresh/leave on the
+      // report page still accounts for usage. End Visit remains a no-op safety net
+      // (delta charge). Back to Recording can add more time; the next Stop bills only the delta.
       dispatch(stopRecording());
+      if (phoneRestarted()) {
+        dispatch(startRecording());
+        dispatch(setCurrentView("recording"));
+        return;
+      }
+
+      await chargeVisitMinutesIfNeeded(dispatch, recordingTimeAtStop);
+
       if (phoneRestarted()) {
         dispatch(startRecording());
         dispatch(setCurrentView("recording"));
