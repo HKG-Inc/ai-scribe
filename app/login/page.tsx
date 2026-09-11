@@ -3,7 +3,6 @@
 import { useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
-import Link from "next/link";
 import { Mail, Lock, Eye, EyeOff, AlertCircle } from "lucide-react";
 import { useAppDispatch } from "@/store/hooks";
 import { setUser, setLoggedIn } from "@/store/slices/userSlice";
@@ -62,7 +61,6 @@ export default function LoginPage() {
   }, [router]);
 
   const [email, setEmail] = useState(() => searchParams.get("email") ?? "");
-  const signupSuccess = searchParams.get("signup") === "success";
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
@@ -352,12 +350,6 @@ export default function LoginPage() {
             </div>
           )}
 
-          {signupSuccess && !error && (
-            <div className="mb-4 p-3 bg-green-50 border border-green-200 text-green-700 rounded-lg text-sm">
-              Account created successfully. Sign in with your new credentials.
-            </div>
-          )}
-
           <form className="space-y-5" onSubmit={handleLogin}>
             {/* Email */}
             <div className="space-y-2">
@@ -429,16 +421,6 @@ export default function LoginPage() {
               </div>
             </div>
           </form>
-
-          <div className="mt-8 text-center">
-            <span className="text-slate-600">Don&apos;t have an account? </span>
-            <Link
-              href="/signup"
-              className="text-brand-pink hover:text-brand-orange transition-colors font-medium"
-            >
-              Sign Up
-            </Link>
-          </div>
 
           <div className="mt-8 pt-6 border-t border-slate-100">
             <div className="flex justify-center space-x-4">

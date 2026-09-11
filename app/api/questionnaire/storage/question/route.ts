@@ -9,7 +9,7 @@ import {
 export const runtime = "nodejs";
 
 /**
- * GET /api/questionnaire/storage/question?locale=te-IN&question=q1
+ * GET /api/questionnaire/storage/question?locale=hi-IN&question=q1
  *
  * Returns pre-stored translated question text + a time-limited WAV signed URL.
  * Used as the primary play path; the live questionnaire-agent is the fallback.

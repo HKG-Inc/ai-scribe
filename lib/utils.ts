@@ -26,7 +26,7 @@ function getRuntimeBasePath(): string {
   // On Hikigai platform the app is mounted at /<slug>/... e.g. /ai-scribe-a060ee0a.
   // The platform may also mount apps at reserved-looking paths like /signup.
   const knownPages = new Set([
-    "recording", "login", "signup", "pricing", "help",
+    "recording", "login", "pricing", "help",
     "visit-details", "processing", "api",
   ]);
   const pathSegments = window.location.pathname.split("/").filter(Boolean);

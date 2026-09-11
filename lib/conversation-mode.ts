@@ -35,28 +35,12 @@ export interface QuestionnaireHistoryItem {
 
 export const PATIENT_LANGUAGES = [
   { value: "ar-XA", label: "Arabic / العربية" },
-  { value: "bn-IN", label: "Bengali / বাংলা" },
-  { value: "de-DE", label: "German / Deutsch" },
   { value: "en-US", label: "English" },
-  { value: "es-ES", label: "Spanish / Español" },
-  { value: "fr-FR", label: "French / Français" },
-  { value: "gu-IN", label: "Gujarati / ગુજરાતી" },
   { value: "hi-IN", label: "Hindi / हिन्दी" },
-  { value: "it-IT", label: "Italian / Italiano" },
-  { value: "ja-JP", label: "Japanese / 日本語" },
-  { value: "kn-IN", label: "Kannada / ಕನ್ನಡ" },
-  { value: "ko-KP", label: "Korean / 한국어" },
   { value: "ml-IN", label: "Malayalam / മലയാളം" },
-  { value: "mr-IN", label: "Marathi / मराठी" },
-  { value: "pl-PL", label: "Polish / Polski" },
-  { value: "pt-BR", label: "Portuguese / Português" },
-  { value: "ru-RU", label: "Russian / Русский" },
+  { value: "es-ES", label: "Spanish / Español" },
   { value: "ta-IN", label: "Tamil / தமிழ்" },
-  { value: "te-IN", label: "Telugu / తెలుగు" },
-  { value: "th-TH", label: "Thai / ไทย" },
   { value: "uk-UA", label: "Ukrainian / Українська" },
-  { value: "vi-VN", label: "Vietnamese / Tiếng Việt" },
-  { value: "zh-CN", label: "Chinese / 中文" },
 ] as const;
 
 export const QUESTIONS: Question[] = [

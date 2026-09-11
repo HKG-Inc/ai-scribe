@@ -4,7 +4,6 @@ const basePath = process.env.BASEPATH || "";
 
 const bareAppRoutes = [
   "/login",
-  "/signup",
   "/recording",
   "/pricing",
   "/help",
@@ -17,8 +16,23 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_BASEPATH: basePath,
   },
   async redirects() {
+    const redirects = [
+      {
+        source: "/signup",
+        destination: `${basePath}/login`,
+        permanent: false,
+        ...(basePath ? { basePath: false as const } : {}),
+      },
+      {
+        source: "/signup/:path*",
+        destination: `${basePath}/login`,
+        permanent: false,
+        ...(basePath ? { basePath: false as const } : {}),
+      },
+    ];
+
     if (!basePath) {
-      return [];
+      return redirects;
     }
 
     return [
@@ -26,22 +40,23 @@ const nextConfig: NextConfig = {
         source: "/",
         destination: `${basePath}/login`,
         permanent: false,
-        basePath: false,
+        basePath: false as const,
       },
       ...bareAppRoutes.flatMap((route) => [
         {
           source: route,
           destination: `${basePath}${route}`,
           permanent: false,
-          basePath: false,
+          basePath: false as const,
         },
         {
           source: `${route}/:path*`,
           destination: `${basePath}${route}/:path*`,
           permanent: false,
-          basePath: false,
+          basePath: false as const,
         },
       ]),
+      ...redirects,
     ];
   },
   serverExternalPackages: ["mupdf"],
