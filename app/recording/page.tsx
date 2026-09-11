@@ -167,6 +167,9 @@ export default function RecordingPage() {
     pauseSendingAudio,
     resumeSendingAudio,
     flushDraft,
+    commitRecordingSegment,
+    takeVisitRecordingWav,
+    clearVisitRecording,
   } = useLiveTranscription({
     onLiveDraft: setLiveDraft,
     onTurnComplete: (text) => dispatch(addTranscription(text)),
@@ -181,6 +184,52 @@ export default function RecordingPage() {
     },
   });
 
+  /**
+   * Upload one visit WAV (all Record→Stop segments) then clear local audio.
+   * Fire-and-forget — does not block End Visit navigation.
+   */
+  const uploadVisitRecordingWav = (visitId: string | null) => {
+    const wavBlob = takeVisitRecordingWav();
+    if (!wavBlob || wavBlob.size === 0) {
+      return;
+    }
+
+    const form = new FormData();
+    form.append("file", wavBlob, "recording.wav");
+    if (visitId) {
+      form.append("visit_id", visitId);
+    }
+    const sessionId = store.getState().recording.sessionId;
+    if (sessionId) {
+      form.append("session_id", sessionId);
+    }
+
+    void apiFetch("/api/recording/storage/upload", {
+      method: "POST",
+      body: form,
+    })
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(
+            typeof err.error === "string" ? err.error : `Upload failed (${res.status})`
+          );
+        }
+        const data = (await res.json()) as {
+          original_filename?: string;
+          object_id?: string;
+        };
+        logger.info("recording/page", "visit wav uploaded on end visit", {
+          objectId: data.object_id,
+          filename: data.original_filename,
+          visitId: visitId || undefined,
+        });
+      })
+      .catch((error) => {
+        logger.warn("recording/page", "visit wav upload failed", errorFields(error));
+      });
+  };
+
   const companionTranscript = useCompanionTranscript(recording.visitId, doctorId, {
     onVisitEnded: () => {
       if (endingVisitRef.current) {
@@ -191,8 +240,10 @@ export default function RecordingPage() {
       if (isRecordingRef.current) {
         stopAudioCapture();
         disconnect();
+        commitRecordingSegment();
       }
       const state = store.getState().recording;
+      uploadVisitRecordingWav(state.visitId);
       void chargeVisitMinutesIfNeeded(dispatch, state.recordingTime).then(() => {
         dispatch(endVisit());
       });
@@ -329,6 +380,7 @@ export default function RecordingPage() {
   const handleStartVisit = () => {
     companionDrivenRef.current = false;
     endingVisitRef.current = false;
+    clearVisitRecording();
     const visitId = `visit_${Date.now()}`;
     dispatch(startVisit(visitId));
   };
@@ -948,6 +1000,12 @@ export default function RecordingPage() {
         }
       }
 
+      // Browser mic: fold this Record→Stop segment into the visit buffer.
+      // One WAV is uploaded later on End Visit (not on each Stop).
+      if (!companionDriven) {
+        commitRecordingSegment();
+      }
+
       const pending = companionTranscript.pendingText.trim();
       const sourceLines = (
         options?.lines ??
@@ -971,6 +1029,7 @@ export default function RecordingPage() {
 
       if (!transcriptMessage) {
         endingVisitRef.current = true;
+        uploadVisitRecordingWav(visitIdAtStop);
         companionTranscript.endVisit();
         // Empty visit ends here — deduct any uncharged active recording time.
         await chargeVisitMinutesIfNeeded(dispatch, recordingTimeAtStop);
@@ -1031,6 +1090,7 @@ export default function RecordingPage() {
    */
   const releaseCompanionVisit = () => {
     endingVisitRef.current = true;
+    const visitId = store.getState().recording.visitId;
     if (companionDrivenRef.current) {
       companionTranscript.sendControl("stop");
       companionDrivenRef.current = false;
@@ -1042,7 +1102,9 @@ export default function RecordingPage() {
         dispatch(addTranscription(draft));
         setLiveDraft("");
       }
+      commitRecordingSegment();
     }
+    uploadVisitRecordingWav(visitId);
     companionTranscript.endVisit();
   };
 

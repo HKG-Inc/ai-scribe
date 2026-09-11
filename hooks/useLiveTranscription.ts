@@ -1,9 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef } from "react";
+import {
+  encodePcm16ChunksToWav,
+  RECORDING_PCM_SAMPLE_RATE,
+} from "@/lib/audio/pcm-wav";
 import { apiFetch, withBasePath } from "@/lib/utils";
 
-const INPUT_AUDIO_RATE = 16000;
+const INPUT_AUDIO_RATE = RECORDING_PCM_SAMPLE_RATE;
 const KEEPALIVE_MS = 4000;
 const SILENT_PCM_MS = 40;
 const RECONNECT_BASE_DELAY_MS = 1500;
@@ -104,6 +108,12 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
   const recorderNodeRef = useRef<AudioWorkletNode | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const speechRafRef = useRef<number | null>(null);
+  /** PCM16 for the current Record→Stop segment. */
+  const pcmChunksRef = useRef<Uint8Array[]>([]);
+  const pcmBytesRef = useRef(0);
+  /** PCM16 for the whole visit (all segments until End Visit). */
+  const visitPcmChunksRef = useRef<Uint8Array[]>([]);
+  const visitPcmBytesRef = useRef(0);
 
   const stopSpeechMonitor = useCallback(() => {
     if (speechRafRef.current !== null) {
@@ -508,7 +518,11 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
         if (!audioSendingEnabledRef.current) {
           return;
         }
-        sendAudioPcm(new Uint8Array(event.data));
+        // Copy — worklet may reuse the underlying buffer.
+        const pcm = new Uint8Array(event.data.slice(0));
+        pcmChunksRef.current.push(pcm);
+        pcmBytesRef.current += pcm.byteLength;
+        sendAudioPcm(pcm);
       };
 
       analyserRef.current.connect(recorderNode);
@@ -591,6 +605,44 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
    * Same order as live_transcriber.html `startSession`:
    * mic first → mint session + open WS → start sending.
    */
+  const clearRecordingBuffer = useCallback(() => {
+    pcmChunksRef.current = [];
+    pcmBytesRef.current = 0;
+  }, []);
+
+  const clearVisitRecording = useCallback(() => {
+    clearRecordingBuffer();
+    visitPcmChunksRef.current = [];
+    visitPcmBytesRef.current = 0;
+  }, [clearRecordingBuffer]);
+
+  /**
+   * Fold the current Record→Stop segment into the visit buffer.
+   * Call on Stop (and before End Visit if mic was still open).
+   */
+  const commitRecordingSegment = useCallback(() => {
+    const chunks = pcmChunksRef.current;
+    if (chunks.length > 0) {
+      for (const chunk of chunks) {
+        visitPcmChunksRef.current.push(chunk);
+        visitPcmBytesRef.current += chunk.byteLength;
+      }
+    }
+    clearRecordingBuffer();
+  }, [clearRecordingBuffer]);
+
+  /**
+   * Build one WAV for the whole visit and clear visit audio.
+   * Commits any uncommitted live segment first.
+   */
+  const takeVisitRecordingWav = useCallback((): Blob | null => {
+    commitRecordingSegment();
+    const chunks = visitPcmChunksRef.current;
+    visitPcmChunksRef.current = [];
+    visitPcmBytesRef.current = 0;
+    return encodePcm16ChunksToWav(chunks, INPUT_AUDIO_RATE);
+  }, [commitRecordingSegment]);
+
   const startTranscription = useCallback(async (): Promise<boolean> => {
     manualCloseRef.current = false;
     sessionActiveRef.current = true;
@@ -600,6 +652,8 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
     completedTranscriptRef.current = "";
     transcriptTextSourceRef.current = null;
     wsInputThisTurnRef.current = false;
+    // Only clear the live segment — visit buffer keeps prior Stop segments.
+    clearRecordingBuffer();
     callbacksRef.current.onLiveDraft("");
 
     const micStarted = await startAudioCapture();
@@ -623,7 +677,7 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
       callbacksRef.current.onError(`socket-connect:${message}`);
       return false;
     }
-  }, [closeSocket, connect, startAudioCapture, startSendingAudio, stopAudioCapture, stopReconnectTimer]);
+  }, [clearRecordingBuffer, closeSocket, connect, startAudioCapture, startSendingAudio, stopAudioCapture, stopReconnectTimer]);
 
   /** Commit open draft without firing onTurnComplete (caller adds to Redux). */
   const flushDraft = useCallback(() => {
@@ -659,6 +713,9 @@ export function useLiveTranscription(callbacks: LiveTranscriptionCallbacks) {
     pauseSendingAudio,
     resumeSendingAudio,
     flushDraft,
+    commitRecordingSegment,
+    takeVisitRecordingWav,
+    clearVisitRecording,
     isSessionActive: () => sessionActiveRef.current,
   };
 }
