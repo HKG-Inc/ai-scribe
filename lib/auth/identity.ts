@@ -1,3 +1,4 @@
+import { randomUUID } from "crypto";
 import { HIKIGAI_BACKEND_URL_DEFAULT } from "@/lib/hikigai";
 import { logAuthError, logAuthOk } from "@/lib/auth/log";
 import { parseRawResponse } from "@/lib/logger";
@@ -211,6 +212,37 @@ export async function signupEndUser(input: {
     email: input.email,
     confirmed: result.confirmed,
   });
+
+  // Stable companion/relay id — set once at signup so CarePilot can join by doctorID.
+  const userId = result.user_id?.trim();
+  if (userId) {
+    const doctorID = randomUUID();
+    try {
+      await updateEndUser(userId, { metadata: { doctorID } });
+      logAuthOk("identity-backend", "signup doctorID assigned", {
+        source: "server",
+        origin: "hikigai-backend",
+        event: "signup_doctor_id_ok",
+        email: input.email,
+        userId,
+      });
+    } catch (error) {
+      logAuthError(
+        "identity-backend",
+        "signup doctorID assignment failed",
+        {
+          source: "server",
+          origin: "hikigai-backend",
+          event: "signup_doctor_id_failed",
+          email: input.email,
+          userId,
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+        error
+      );
+    }
+  }
+
   return result;
 }
 
