@@ -1,6 +1,12 @@
 "use client";
 
 import { apiFetch } from "@/lib/utils";
+import {
+  logAuthError,
+  logAuthOk,
+  logAuthWarn,
+  type AuthLogOrigin,
+} from "@/lib/auth/log";
 
 const SESSION_KEY = "hikigai.identity.session";
 
@@ -139,27 +145,76 @@ export async function identityApi<T>(
   path: string,
   body: Record<string, unknown>
 ): Promise<T> {
-  const response = await apiFetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const email = typeof body.email === "string" ? body.email : undefined;
+  const eventBase = path.replace(/^\/api\/identity\//, "").replace(/\//g, "_") || "identity";
+
+  let response: Response;
+  try {
+    response = await apiFetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (cause) {
+    logAuthError(
+      "identity-client",
+      "network failure calling next identity api",
+      {
+        source: "frontend",
+        origin: "client",
+        event: `${eventBase}_network_error`,
+        path,
+        email,
+        errorMessage: cause instanceof Error ? cause.message : String(cause),
+      },
+      cause
+    );
+    throw cause instanceof Error ? cause : new Error("Network request failed");
+  }
 
   const contentType = response.headers.get("content-type") || "";
   const isJson = contentType.includes("application/json");
 
   if (!isJson) {
-    throw new Error(
+    const errorMessage =
       response.status === 404
         ? `Identity API not found (${path}). Check that the request includes the app base path.`
-        : `Identity API returned a non-JSON response (${response.status}).`
-    );
+        : `Identity API returned a non-JSON response (${response.status}).`;
+    logAuthError("identity-client", "non-JSON identity response", {
+      source: "frontend",
+      origin: "next-api",
+      event: `${eventBase}_non_json`,
+      path,
+      status: response.status,
+      email,
+      errorMessage,
+    });
+    throw new Error(errorMessage);
   }
 
-  const data = (await response.json()) as T & { error?: string };
+  const data = (await response.json()) as T & {
+    error?: string;
+    source?: string;
+    origin?: AuthLogOrigin;
+  };
 
   if (!response.ok) {
-    throw new Error(data.error || "Request failed");
+    const serverMessage = data.error || "Request failed";
+    const origin: AuthLogOrigin =
+      data.origin === "hikigai-backend" || data.origin === "next-api" || data.origin === "client"
+        ? data.origin
+        : "next-api";
+    logAuthError("identity-client", "identity api error response", {
+      source: "frontend",
+      origin,
+      event: `${eventBase}_failed`,
+      path,
+      status: response.status,
+      email,
+      errorMessage: serverMessage,
+      serverSource: data.source ?? "server",
+    });
+    throw new Error(serverMessage);
   }
 
   return data;
@@ -192,8 +247,21 @@ export async function refreshIdentitySession(): Promise<IdentitySession | null> 
       current.email
     );
     setIdentitySession(next);
+    logAuthOk("identity-client", "session refresh ok", {
+      source: "frontend",
+      origin: "client",
+      event: "refresh_session_ok",
+      email: current.email,
+    });
     return next;
-  } catch {
+  } catch (error) {
+    logAuthWarn("identity-client", "session refresh failed; clearing session", {
+      source: "frontend",
+      origin: "client",
+      event: "refresh_session_failed",
+      email: current.email,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
     clearIdentitySession();
     return null;
   }
