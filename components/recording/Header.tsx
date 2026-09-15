@@ -24,6 +24,7 @@ import {
   PASSWORD_REQUIREMENTS_MSG,
 } from "@/lib/auth/reset-password";
 import { formatAuthError, trimAuthInput } from "@/lib/auth/errors";
+import { logAuthOk, logAuthWarn } from "@/lib/auth/log";
 import {
   clearIdentitySession,
   ensureIdentitySession,
@@ -446,13 +447,32 @@ export function UserProfileSidebar({
   };
 
   const handleLogout = async () => {
+    const session = getIdentitySession();
+    const email = user.email || session?.email || "";
+    logAuthOk("logout", "logout started", {
+      source: "frontend",
+      origin: "client",
+      event: "logout_attempt",
+      email: email || undefined,
+    });
     try {
-      const session = getIdentitySession();
-      const email = user.email || session?.email;
       if (email) {
         await identityApi("/api/identity/logout", { email });
+        logAuthOk("logout", "remote logout ok", {
+          source: "frontend",
+          origin: "client",
+          event: "logout_remote_ok",
+          email,
+        });
       }
-    } catch {
+    } catch (error) {
+      logAuthWarn("logout", "remote logout failed; continuing local logout", {
+        source: "frontend",
+        origin: "client",
+        event: "logout_remote_failed",
+        email: email || undefined,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       // Continue local logout even if remote revoke fails.
     }
     clearIdentitySession();
@@ -461,6 +481,12 @@ export function UserProfileSidebar({
     await chargeVisitMinutesIfNeeded(dispatch, recordingTime);
     dispatch(logout());
     dispatch(endVisit());
+    logAuthOk("logout", "local logout complete", {
+      source: "frontend",
+      origin: "client",
+      event: "logout_success",
+      email: email || undefined,
+    });
     router.push("/login");
   };
 

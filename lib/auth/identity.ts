@@ -1,4 +1,6 @@
 import { HIKIGAI_BACKEND_URL_DEFAULT } from "@/lib/hikigai";
+import { logAuthError, logAuthOk } from "@/lib/auth/log";
+import { parseRawResponse } from "@/lib/logger";
 
 const USER_AGENT = "hikigai-sdk/0.0.1";
 
@@ -89,50 +91,78 @@ function identityHeaders(contentType = false): HeadersInit {
   return headers;
 }
 
-async function parseErrorMessage(response: Response, fallback: string): Promise<string> {
-  const text = await response.text();
-  if (!text) {
-    return fallback;
-  }
-
+function messageFromRawBody(rawText: string, fallback: string): string {
+  if (!rawText) return fallback;
   try {
-    const data = JSON.parse(text) as {
+    const data = JSON.parse(rawText) as {
       detail?: string | { msg?: string }[];
       message?: string;
       error?: string;
       error_message?: string;
     };
-
-    if (typeof data.detail === "string") {
-      return data.detail;
-    }
-    if (Array.isArray(data.detail) && data.detail[0]?.msg) {
-      return data.detail[0].msg;
-    }
-    if (typeof data.message === "string") {
-      return data.message;
-    }
-    if (typeof data.error === "string") {
-      return data.error;
-    }
-    if (typeof data.error_message === "string") {
-      return data.error_message;
-    }
+    if (typeof data.detail === "string") return data.detail;
+    if (Array.isArray(data.detail) && data.detail[0]?.msg) return data.detail[0].msg;
+    if (typeof data.message === "string") return data.message;
+    if (typeof data.error === "string") return data.error;
+    if (typeof data.error_message === "string") return data.error_message;
   } catch {
-    // return raw text below
+    // fall through
   }
-
-  return text;
+  return rawText;
 }
 
 async function identityFetch<T>(
   path: string,
   init: RequestInit,
-  fallbackError: string
+  fallbackError: string,
+  meta?: { event?: string; email?: string }
 ): Promise<T> {
-  const response = await fetch(`${getBackendUrl()}${path}`, init);
+  const url = `${getBackendUrl()}${path}`;
+  const event = meta?.event ?? "identity_request";
+  const method = (init.method || "GET").toUpperCase();
+
+  let response: Response;
+  try {
+    response = await fetch(url, init);
+  } catch (cause) {
+    logAuthError(
+      "identity-backend",
+      "network failure calling hikigai identity",
+      {
+        source: "server",
+        origin: "hikigai-backend",
+        event: `${event}_network_error`,
+        path,
+        url,
+        method,
+        ...(meta?.email ? { email: meta.email } : {}),
+        errorMessage: cause instanceof Error ? cause.message : String(cause),
+      },
+      cause
+    );
+    throw new Error(
+      cause instanceof Error ? cause.message : "Identity service unreachable"
+    );
+  }
+
   if (!response.ok) {
-    throw new Error(await parseErrorMessage(response, fallbackError));
+    const rawText = await response.text();
+    const errorMessage = messageFromRawBody(rawText, fallbackError);
+
+    logAuthError("identity-backend", "hikigai identity request failed", {
+      source: "server",
+      origin: "hikigai-backend",
+      event: `${event}_failed`,
+      path,
+      url,
+      method,
+      status: response.status,
+      statusText: response.statusText,
+      errorMessage,
+      rawResponse: parseRawResponse(rawText),
+      ...(meta?.email ? { email: meta.email } : {}),
+    });
+    throw new Error(errorMessage || fallbackError);
   }
 
   if (response.status === 204) {
@@ -149,7 +179,8 @@ export async function getIdentityConfig(): Promise<IdentityAppConfig> {
       method: "GET",
       headers: identityHeaders(),
     },
-    "Failed to fetch identity config"
+    "Failed to fetch identity config",
+    { event: "identity_config" }
   );
 }
 
@@ -160,7 +191,7 @@ export async function signupEndUser(input: {
   last_name?: string;
   attributes?: Record<string, string>;
 }): Promise<IdentitySignupResult> {
-  return identityFetch<IdentitySignupResult>(
+  const result = await identityFetch<IdentitySignupResult>(
     "/api/v1/identity/signup",
     {
       method: "POST",
@@ -170,15 +201,24 @@ export async function signupEndUser(input: {
         ...input,
       }),
     },
-    "Sign up failed"
+    "Sign up failed",
+    { event: "signup", email: input.email }
   );
+  logAuthOk("identity-backend", "signup ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "signup_ok",
+    email: input.email,
+    confirmed: result.confirmed,
+  });
+  return result;
 }
 
 export async function confirmEndUser(input: {
   email: string;
   code: string;
 }): Promise<{ success: boolean; message: string }> {
-  return identityFetch(
+  const result = await identityFetch<{ success: boolean; message: string }>(
     "/api/v1/identity/confirm",
     {
       method: "POST",
@@ -188,15 +228,23 @@ export async function confirmEndUser(input: {
         ...input,
       }),
     },
-    "Confirmation failed"
+    "Confirmation failed",
+    { event: "confirm", email: input.email }
   );
+  logAuthOk("identity-backend", "confirm ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "confirm_ok",
+    email: input.email,
+  });
+  return result;
 }
 
 export async function loginEndUser(input: {
   email: string;
   password: string;
 }): Promise<IdentityLoginResult> {
-  return identityFetch<IdentityLoginResult>(
+  const result = await identityFetch<IdentityLoginResult>(
     "/api/v1/identity/login",
     {
       method: "POST",
@@ -206,12 +254,24 @@ export async function loginEndUser(input: {
         ...input,
       }),
     },
-    "Sign in failed"
+    "Sign in failed",
+    { event: "login", email: input.email }
   );
+  logAuthOk("identity-backend", "login ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "login_ok",
+    email: input.email,
+    loginStatus: result.status,
+    ...(result.status === "challenge"
+      ? { challengeName: result.challenge_name }
+      : {}),
+  });
+  return result;
 }
 
 export async function refreshEndUser(refreshToken: string): Promise<IdentityRefreshResult> {
-  return identityFetch<IdentityRefreshResult>(
+  const result = await identityFetch<IdentityRefreshResult>(
     "/api/v1/identity/refresh",
     {
       method: "POST",
@@ -221,12 +281,19 @@ export async function refreshEndUser(refreshToken: string): Promise<IdentityRefr
         refresh_token: refreshToken,
       }),
     },
-    "Token refresh failed"
+    "Token refresh failed",
+    { event: "refresh" }
   );
+  logAuthOk("identity-backend", "refresh ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "refresh_ok",
+  });
+  return result;
 }
 
 export async function logoutEndUser(email: string): Promise<{ success: boolean; message: string }> {
-  return identityFetch(
+  const result = await identityFetch<{ success: boolean; message: string }>(
     "/api/v1/identity/logout",
     {
       method: "POST",
@@ -236,12 +303,20 @@ export async function logoutEndUser(email: string): Promise<{ success: boolean; 
         email,
       }),
     },
-    "Logout failed"
+    "Logout failed",
+    { event: "logout", email }
   );
+  logAuthOk("identity-backend", "logout ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "logout_ok",
+    email,
+  });
+  return result;
 }
 
 export async function forgotPassword(email: string): Promise<{ success: boolean; message: string }> {
-  return identityFetch(
+  const result = await identityFetch<{ success: boolean; message: string }>(
     "/api/v1/identity/forgot-password",
     {
       method: "POST",
@@ -251,8 +326,16 @@ export async function forgotPassword(email: string): Promise<{ success: boolean;
         email,
       }),
     },
-    "Failed to request password reset"
+    "Failed to request password reset",
+    { event: "forgot_password", email }
   );
+  logAuthOk("identity-backend", "forgot-password ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "forgot_password_ok",
+    email,
+  });
+  return result;
 }
 
 export async function resetPassword(input: {
@@ -260,7 +343,7 @@ export async function resetPassword(input: {
   code: string;
   new_password: string;
 }): Promise<{ success: boolean; message: string }> {
-  return identityFetch(
+  const result = await identityFetch<{ success: boolean; message: string }>(
     "/api/v1/identity/reset-password",
     {
       method: "POST",
@@ -270,8 +353,16 @@ export async function resetPassword(input: {
         ...input,
       }),
     },
-    "Failed to reset password"
+    "Failed to reset password",
+    { event: "reset_password", email: input.email }
   );
+  logAuthOk("identity-backend", "reset-password ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "reset_password_ok",
+    email: input.email,
+  });
+  return result;
 }
 
 export async function changePassword(input: {
@@ -279,7 +370,7 @@ export async function changePassword(input: {
   current_password: string;
   new_password: string;
 }): Promise<{ success: boolean; message: string }> {
-  return identityFetch(
+  const result = await identityFetch<{ success: boolean; message: string }>(
     "/api/v1/identity/change-password",
     {
       method: "POST",
@@ -289,8 +380,15 @@ export async function changePassword(input: {
         ...input,
       }),
     },
-    "Failed to change password"
+    "Failed to change password",
+    { event: "change_password" }
   );
+  logAuthOk("identity-backend", "change-password ok", {
+    source: "server",
+    origin: "hikigai-backend",
+    event: "change_password_ok",
+  });
+  return result;
 }
 
 export type EndUserProfile = {
@@ -323,7 +421,8 @@ export async function getEndUser(userId: string): Promise<EndUserProfile> {
       method: "GET",
       headers: identityHeaders(),
     },
-    "Failed to fetch profile"
+    "Failed to fetch profile",
+    { event: "get_end_user" }
   );
 }
 
@@ -338,6 +437,7 @@ export async function updateEndUser(
       headers: identityHeaders(true),
       body: JSON.stringify(input),
     },
-    "Failed to update profile"
+    "Failed to update profile",
+    { event: "update_end_user" }
   );
 }

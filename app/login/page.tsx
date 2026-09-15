@@ -29,6 +29,7 @@ import {
   PASSWORD_REQUIREMENTS_MSG,
 } from "@/lib/auth/reset-password";
 import { formatAuthError, trimAuthInput } from "@/lib/auth/errors";
+import { logAuthError, logAuthOk } from "@/lib/auth/log";
 import { syncEndUserProfile } from "@/lib/auth/profile";
 
 export default function LoginPage() {
@@ -105,6 +106,12 @@ export default function LoginPage() {
     }
 
     setIsLoading(true);
+    logAuthOk("login-page", "login attempt started", {
+      source: "frontend",
+      origin: "client",
+      event: "login_attempt",
+      email: trimmedEmail,
+    });
     try {
       const result = await identityApi<{
         status: string;
@@ -122,6 +129,13 @@ export default function LoginPage() {
       });
 
       if (result.status === "challenge" || result.challenge_name) {
+        logAuthError("login-page", "login challenge required", {
+          source: "frontend",
+          origin: "client",
+          event: "login_challenge",
+          email: trimmedEmail,
+          challengeName: result.challenge_name,
+        });
         setError("Additional authentication is required. MFA support is coming soon.");
         setIsLoading(false);
         return;
@@ -134,6 +148,17 @@ export default function LoginPage() {
         !result.refresh_token ||
         !result.expires_in
       ) {
+        logAuthError("login-page", "login response incomplete", {
+          source: "frontend",
+          origin: "client",
+          event: "login_incomplete_response",
+          email: trimmedEmail,
+          loginStatus: result.status,
+          hasIdToken: Boolean(result.id_token),
+          hasAccessToken: Boolean(result.access_token),
+          hasRefreshToken: Boolean(result.refresh_token),
+          hasExpiresIn: Boolean(result.expires_in),
+        });
         setError("Sign in failed. Please try again.");
         setIsLoading(false);
         return;
@@ -193,13 +218,34 @@ export default function LoginPage() {
         })
       );
       dispatch(setLoggedIn(true));
+      logAuthOk("login-page", "login success", {
+        source: "frontend",
+        origin: "client",
+        event: "login_success",
+        email: trimmedEmail,
+        userId: result.user_id,
+      });
       void syncMinutesLeft(dispatch);
       void syncEndUserProfile(dispatch).catch(() => {
         // Keep claim/pending profile if platform profile sync fails.
       });
       router.push("/recording");
     } catch (error) {
-      setError(formatAuthError(error, "Sign in failed. Please try again."));
+      const display = formatAuthError(error, "Sign in failed. Please try again.");
+      logAuthError(
+        "login-page",
+        "login failed (shown to user)",
+        {
+          source: "frontend",
+          origin: "client",
+          event: "login_failed_ui",
+          email: trimmedEmail,
+          errorMessage: error instanceof Error ? error.message : String(error),
+          displayMessage: display,
+        },
+        error
+      );
+      setError(display);
     } finally {
       setIsLoading(false);
     }
