@@ -25,7 +25,7 @@ export function QRCodeCard({ doctorId, visitId }: QRCodeCardProps) {
       </div>
 
       <p className="text-sm text-slate-500 text-center">
-        This code contains the doctor, visit, and patient ids the companion app needs to join this session
+        This code contains the app, doctor, visit, and patient ids the companion app needs to join this session
       </p>
     </div>
   );

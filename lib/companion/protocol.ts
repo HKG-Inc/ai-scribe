@@ -137,10 +137,14 @@ export function relayReconnectDelayMs(attempt: number): number {
 /** Placeholder until AI Scribe has a real patient id. The companion app requires this field. */
 export const HARDCODED_PATIENT_ID = "patient-001";
 
+/** Abraham deploy — companion QR discriminator is fixed for this app. */
+export const COMPANION_APP_SLUG = "abraham" as const;
+
 export function buildVisitQrPayload(doctorId: string, visitId: string): string {
   return JSON.stringify({
     type: "carepilot.visit",
     v: 1,
+    app: COMPANION_APP_SLUG,
     patientId: HARDCODED_PATIENT_ID,
     doctorId,
     visitId,
