@@ -41,6 +41,7 @@ import {
   type ReportData,
 } from "@/store/slices/recordingSlice";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { WriteBackButton } from "@/components/recording/WriteBackButton";
 
 function SectionBodyLoader() {
   return (
@@ -1682,6 +1683,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
               </>
             )}
           </button>
+          <WriteBackButton />
           <button
             onClick={() => void handleEndVisit()}
             disabled={isEndingVisit}
@@ -1692,7 +1694,7 @@ export function ReportView({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void
             ) : (
               <X className="h-4 w-4 sm:mr-1" />
             )}
-            <span className="hidden sm:inline">End Visit</span>
+            <span className="hidden sm:inline">Submit</span>
           </button>
         </div>
       </header>

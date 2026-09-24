@@ -47,7 +47,7 @@ export function ModeWarningDialog({ open, onClose }: ModeWarningDialogProps) {
             Normal Mode after ending this visit.
           </p>
           <p className="text-slate-600 text-sm mt-3">
-            To switch modes, please click the &quot;End Visit&quot; button in the header and start a new visit.
+            To switch modes, please click the &quot;Submit&quot; button in the header and start a new visit.
           </p>
         </div>
         <div className="flex justify-end">

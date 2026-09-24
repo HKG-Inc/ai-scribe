@@ -16,6 +16,7 @@ import { getInitials, getPersonNameError } from "@/lib/utils";
 import { SPECIALTIES } from "@/lib/specialties";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
+import { WriteBackButton } from "@/components/recording/WriteBackButton";
 import { chargeVisitMinutesIfNeeded, syncMinutesLeft } from "@/lib/auth/minutes";
 import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
 import {
@@ -118,6 +119,8 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
               </button>
             )}
 
+            <WriteBackButton />
+
             <button
               onClick={() => void handleEndVisit()}
               disabled={isEndingVisit}
@@ -128,7 +131,7 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
               ) : (
                 <X className="h-3 w-3 sm:h-4 sm:w-4 mr-0.5 sm:mr-1 md:mr-2" />
               )}
-              <span className="hidden sm:inline">End Visit</span>
+              <span className="hidden sm:inline">Submit</span>
             </button>
           </>
         )}
