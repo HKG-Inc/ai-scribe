@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { apiFetch, cn, getPersonNameError } from "@/lib/utils";
+import { apiFetch, cn, getPersonNameError, withBasePath } from "@/lib/utils";
 import {
   Check,
   X,
@@ -210,10 +210,12 @@ export default function PricingPage() {
             <div className="relative">
               <div className="aspect-video bg-gradient-to-br from-orange-100 to-orange-200 rounded-lg overflow-hidden relative">
                 <video
-                  src="https://storage.googleapis.com/hikigai-video-assets/Launchpad%20EHR%20with%20CarePilot.mp4"
-                  controls
+                  src={withBasePath("/CarePilot%20Demo%20video.mp4")}
+                  autoPlay
                   muted
+                  playsInline
                   loop
+                  controls
                   className="w-full h-full object-cover"
                 />
                 <span className="absolute top-4 left-4 bg-orange-600 text-white rounded-full px-2 py-1 text-xs">
