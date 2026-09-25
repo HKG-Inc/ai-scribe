@@ -43,6 +43,9 @@ import { normalizeReferrals } from "@/lib/referrals";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
 import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
 import { useCompanionTranscript } from "@/hooks/useCompanionTranscript";
+import { useEcwContext } from "@/hooks/useEcwContext";
+import { EcwPatientChart } from "@/components/ecw/EcwPatientChart";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 interface AlertItem {
   type: AlertType;
@@ -133,6 +136,11 @@ function extractSpeakerLines(payload: unknown): string[] {
 
 export default function RecordingPage() {
   const dispatch = useAppDispatch();
+  // Launched from eCW with a patient: offer the patient's eCW chart next to the visit.
+  const ecw = useEcwContext();
+  const hasEcwChart = Boolean(ecw?.patient);
+  const [mainTab, setMainTab] = useState<"visit" | "chart">("visit");
+  const [chartOpened, setChartOpened] = useState(false);
   const router = useRouter();
   const recording = useAppSelector((s) => s.recording);
   const doctorId = useCompanionDoctorId();
@@ -1143,6 +1151,23 @@ export default function RecordingPage() {
 
       {/* Main content */}
       <main className="container mx-auto pt-2 pb-6 px-6 flex-1 flex flex-col">
+        {hasEcwChart && (
+          <Tabs
+            value={mainTab}
+            onValueChange={(v) => {
+              setMainTab(v as "visit" | "chart");
+              if (v === "chart") setChartOpened(true);
+            }}
+          >
+            <TabsList className="gap-2 mb-4">
+              <TabsTrigger value="visit" className="text-xs sm:text-sm px-4">Visit</TabsTrigger>
+              <TabsTrigger value="chart" className="text-xs sm:text-sm px-4">eCW Chart</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        )}
+
+        {/* The visit stays mounted while the chart is shown, so an active recording keeps running. */}
+        <div className={hasEcwChart && mainTab === "chart" ? "hidden" : "contents"}>
         {recording.recordingMode === "conversational" ? (
           <div className="w-full flex-1 flex items-start justify-center">
             <div className="w-full max-w-3xl bg-white rounded-2xl p-6 sm:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.06)] border border-slate-100">
@@ -1199,6 +1224,13 @@ export default function RecordingPage() {
               hasReport={!!recording.reportData}
               onViewReport={() => dispatch(setCurrentView("report"))}
             />
+          </div>
+        )}
+        </div>
+
+        {hasEcwChart && chartOpened && (
+          <div className={mainTab === "chart" ? "contents" : "hidden"}>
+            <EcwPatientChart patientName={ecw?.patient?.name ?? null} />
           </div>
         )}
       </main>

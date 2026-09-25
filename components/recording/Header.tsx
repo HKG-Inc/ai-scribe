@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { Crown, QrCode, X, LogOut, Save, LockKeyhole, Info, Eye, EyeOff, Loader2 } from "lucide-react";
+import { Crown, QrCode, X, LogOut, Save, LockKeyhole, Info, Eye, EyeOff, Loader2, UserRound, Stethoscope } from "lucide-react";
 import { toast } from "sonner";
 import { useAppDispatch, useAppSelector } from "@/store/hooks";
 import {
@@ -19,6 +19,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { WriteBackButton } from "@/components/recording/WriteBackButton";
 import { chargeVisitMinutesIfNeeded, syncMinutesLeft } from "@/lib/auth/minutes";
 import { useCompanionDoctorId } from "@/hooks/useCompanionDoctorId";
+import { useEcwContext } from "@/hooks/useEcwContext";
 import {
   isInvalidResetCodeError,
   isValidPassword,
@@ -57,6 +58,7 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
   const { visitId, showPremiumBanner, recordingTime } = useAppSelector((s) => s.recording);
   const [isEndingVisit, setIsEndingVisit] = useState(false);
   const doctorId = useCompanionDoctorId();
+  const ecw = useEcwContext();
   const canShowQr = !!visitId && !!doctorId;
 
   const handleEndVisit = async () => {
@@ -92,6 +94,22 @@ export function Header({ onBeforeEndVisit }: { onBeforeEndVisit?: () => void } =
         <h1 className="text-lg sm:text-xl lg:text-2xl font-bold bg-clip-text text-transparent bg-brand-gradient truncate">
           HIKIGAI AIScribe
         </h1>
+        {(ecw?.patient?.name || ecw?.doctor?.name) && (
+          <div className="hidden md:flex items-center gap-2 min-w-0 ml-2 pl-3 border-l border-slate-200 text-xs sm:text-sm">
+            {ecw.patient?.name && (
+              <span className="flex items-center gap-1 min-w-0 text-slate-700" title={`eCW patient ${ecw.patient.id}`}>
+                <UserRound className="h-3.5 w-3.5 flex-shrink-0 text-brand-blue" />
+                <span className="truncate font-medium">{ecw.patient.name}</span>
+              </span>
+            )}
+            {ecw.doctor?.name && (
+              <span className="flex items-center gap-1 min-w-0 text-slate-500" title="Signed in to eCW">
+                <Stethoscope className="h-3.5 w-3.5 flex-shrink-0 text-brand-blue" />
+                <span className="truncate">{ecw.doctor.name}</span>
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Right: Action buttons */}

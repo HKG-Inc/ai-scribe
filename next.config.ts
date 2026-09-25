@@ -9,6 +9,8 @@ const bareAppRoutes = [
   "/pricing",
   "/help",
   "/visit-details",
+  "/launch-ecw",
+  "/redirect-ecw",
 ];
 
 const nextConfig: NextConfig = {
